@@ -1,0 +1,40 @@
+{
+  "summary": "Phase 4 backend-only testing of ML-into-API wiring for SkillTrace AI. Wrote /app/backend/tests/test_phase4_ml_wiring.py (14 tests) covering duplicate detection with ?force, free-text follow-up classification, trainee risk, provider at-risk-trainees + RBAC, and regression. Ran the whole suite: 71/71 passed (test_phase4_ml_wiring.py, test_ml_routes.py, test_phase2_regression.py, test_auth_lockout.py). All test data (QA_* trainees + their enrollments/followups/consent_logs) deleted via pymongo teardown; verified 0 leftovers and trainees back to 150, login_attempts cleared. No frontend testing (none exists yet).",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "POST /api/trainees", "issue": "Duplicate soft-block returns HTTP 200 with created:false (works as designed, but 409 Conflict would be more REST-correct for the future frontend)."},
+      {"endpoint": "POST /api/trainees", "issue": "Duplicate check loads the ENTIRE trainees collection into memory (find({}).to_list(100000)) on every create — O(N) per insert, will not scale. Pre-filter by district/phone_masked last4 or index-backed candidate query."},
+      {"endpoint": "GET /api/analytics/provider/{id}/at-risk-trainees", "issue": "N+1 queries: _trainee_risk does 2 DB round-trips per trainee (enrollment + program). ~1.5s for 36 trainees now; batch-fetch enrollments/programs once. Also count reflects filtered rows before limit while at_risk_trainees is truncated by limit — document or return total_matching."},
+      {"endpoint": "CORS", "issue": "allow_origins defaults to '*' with allow_credentials=False. Fine for Bearer-token auth, but set CORS_ORIGINS explicitly before Phase 5 frontend."}
+    ]
+  },
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/test_phase4_ml_wiring.py",
+    "/app/backend/tests/manual_checks.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [
+    "No functional bugs found — all 5 requested Phase 4 behaviours verified working.",
+    "Optional perf: fix O(N) full-collection scan in create_trainee duplicate check and N+1 queries in at-risk-trainees before scaling data.",
+    "Set CORS_ORIGINS explicitly when the Phase 5 frontend lands."
+  ],
+  "critical_code_review_comments": [
+    "create_trainee duplicate check is an unbounded full-collection scan per POST; add a candidate pre-filter (district + phone_masked) so identity matching stays O(k).",
+    "_trainee_risk is called in a loop in at-risk-trainees (2 queries/trainee). Aggregate enrollments and programs in one query each and compute risk in-process.",
+    "server.py is 947 lines — approaching the 700-line guideline; split into routers (auth/trainees/followups/analytics/ml) during Phase 5.",
+    "respond_followup accepts an arbitrary structured_response dict (Optional[dict]) with no Pydantic model — unvalidated raw input stored directly in Mongo."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_phase4_ml_wiring.py (new)",
+    "/app/backend/tests/manual_checks.py (new, ad-hoc verification script)"
+  ],
+  "success_rate": {"backend": "100% (71/71 pytest)", "frontend": "N/A - no frontend yet"},
+  "seed_data_creation": "Created and then DELETED: 5 QA_* trainees (QA_Dup_Test Kumar x2, QA_Unique Persona Zephyr, QA_Weak Profile Trainee, QA_NoEnrollment Person), 1 enrollment, 4 followups, consent_logs. Verified DB clean afterwards (150 trainees, 0 QA_ records). login_attempts collection cleared. NO re-seed required.",
+  "should_call_test_agent_after_fix": false,
+  "should_main_agent_self_test": true,
+  "test_credentials": "/app/memory/test_credentials.md present and valid; all 4 role logins return access_token + user{role, provider_id}. bcrypt hashes are $2b$12$. Lockout (5 fails/15min) verified only against a non-existent email — demo accounts untouched.",
+  "context_for_next_testing_agent": "Suite: /app/backend/tests/{conftest.py,test_ml_routes.py,test_phase2_regression.py,test_auth_lockout.py,test_phase4_ml_wiring.py}; run `cd /app/backend && python -m pytest tests/ -v` (pytest.ini forces -n 2 --dist loadscope). Response shapes to remember: GET /api/trainees/{id} -> {trainee, enrollments, employment}; GET /api/providers and /api/programs return bare LISTS; docs use '_id' not 'id'; POST /api/ml/match-identity body is {name, phone_last4, dob, district}. Provider seeded provider_id comes from login response user.provider_id. at-risk counts on current seed: high=17, medium=23, all=36. test_phase4_ml_wiring.py auto-cleans any trainee whose full_name starts with 'QA_'.",
+  "rca_of_the_issue": "No product defects. Initial 3 failures + 4 errors in my first run were test-side shape mismatches (bare-list endpoints, nested 'trainee' key, ml/match-identity field name); fixed in the test file and all pass. Verified explicitly: identical name+phone+dob+district without ?force returns created:false/requires_confirmation/is_likely_duplicate with explainable possible_matches (score>=80, reasons) and inserts nothing (count stays 1); ?force=true inserts (count 2). 'I started my own beauty salon earning 18000' -> self_employed / Beauty & Wellness, stored confidence_score='self_reported'; 'I got a job at a hospital' -> employed / Healthcare. Weak profile (att 60, score 45) -> risk_score in [0,1], risk_level 'high', non-empty top_contributing_factors, basis.enrollment_id correct; 400 when no enrollment; 404 for unknown id. at-risk-trainees sorted desc, all high, RBAC 403 for another provider and 401/403 unauthenticated."
+}

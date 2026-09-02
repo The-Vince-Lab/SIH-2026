@@ -70,3 +70,9 @@ Every follow-up data point tagged: `verified` > `self_reported` > `unreachable`
   placement-risk prediction (LogReg). Routes under `/api/ml/*`. Seed made
   feature-correlated so the risk model has real signal. Metrics in
   `ml_model_performance.md`. Verified (56/57 backend tests).
+- **Phase 4 (done):** ML wired in-process into routes — `POST /api/trainees` runs
+  identity matching and blocks likely duplicates (`requires_confirmation`, override with
+  `?force=true`); `POST /api/followups/:id/respond` classifies free text via
+  `classify_response` (stores employment_type + sector_guess, `confidence_score=self_reported`);
+  new `GET /api/analytics/trainee/:id/risk` and `GET /api/analytics/provider/:id/at-risk-trainees`.
+  Verified end-to-end (71/71 backend tests).

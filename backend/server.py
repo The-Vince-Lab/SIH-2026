@@ -231,7 +231,18 @@ class TraineeBody(BaseModel):
 
 
 @api.post("/trainees")
-async def create_trainee(body: TraineeBody, user: dict = Depends(require_role("provider", "district_admin", "state_admin", "super_admin"))):
+async def create_trainee(body: TraineeBody, force: bool = Query(False, description="Skip duplicate check and create anyway"),
+                         user: dict = Depends(require_role("provider", "district_admin", "state_admin", "super_admin"))):
+    # Identity matching (in-process) — block silent duplicates unless confirmed
+    if not force:
+        records = await db.trainees.find({}, {"full_name": 1, "phone_masked": 1, "dob": 1, "district": 1}).to_list(100000)
+        phone_last4 = "".join(c for c in body.phone_number if c.isdigit())[-4:]
+        match = identity_matching.match_identity(body.full_name, phone_last4, body.dob, body.district, records)
+        if match["is_likely_duplicate"]:
+            return {"created": False, "requires_confirmation": True,
+                    "is_likely_duplicate": True, "possible_matches": match["possible_matches"],
+                    "message": "A likely existing trainee was found. Confirm this is a new person to proceed (?force=true)."}
+
     now = datetime.now(timezone.utc)
     doc = {
         "full_name": body.full_name, "phone_number": encrypt_phone(body.phone_number),
@@ -247,7 +258,7 @@ async def create_trainee(body: TraineeBody, user: dict = Depends(require_role("p
                                           "timestamp": now, "performed_by": user["email"]})
     doc["_id"] = res.inserted_id
     doc.pop("phone_number", None)
-    return ser(doc)
+    return {"created": True, **ser(doc)}
 
 
 @api.get("/trainees")
@@ -429,9 +440,13 @@ async def respond_followup(followup_id: str, body: RespondBody, user: dict = Dep
     classification = None
     structured = body.structured_response
     if body.raw_response_text and not structured:
-        classification = text_classifier.classify(body.raw_response_text)
-        structured = {"employment_type": classification["employment_type"],
-                      "wage_bracket": classification["wage_bracket"]}
+        classification = response_classifier.classify_response(body.raw_response_text)
+        wage = text_classifier.classify(body.raw_response_text)["wage_bracket"]
+        structured = {"employment_type": classification["predicted_category"],
+                      "wage_bracket": wage,
+                      "sector_guess": classification["sector_guess"],
+                      "classifier_confidence": classification["confidence"],
+                      "classifier_method": classification["method"]}
     if structured is None:
         raise HTTPException(status_code=400, detail="Provide structured_response or raw_response_text")
 
@@ -742,6 +757,89 @@ async def non_placement_analytics(user: dict = Depends(get_current_user), group_
             grouped.setdefault(key, {}).setdefault(r["reason_category"], 0)
             grouped[key][r["reason_category"]] += 1
     return {"group_by": group_by, "data": grouped}
+
+
+# ---------------------------------------------------------------------------
+# Placement-risk analytics (wires ml.placement_risk in-process)
+# ---------------------------------------------------------------------------
+def _age_from_dob(dob: Optional[str]) -> int:
+    if not dob:
+        return 28
+    try:
+        y, m, d = [int(x) for x in dob.split("-")]
+        today = datetime.now(timezone.utc).date()
+        return today.year - y - ((today.month, today.day) < (m, d))
+    except Exception:
+        return 28
+
+
+async def _trainee_risk(trainee: dict) -> Optional[dict]:
+    """Compute risk from the trainee's most recent certified enrollment."""
+    enr = await db.enrollments.find_one(
+        {"trainee_id": trainee["_id"], "certified": True},
+        sort=[("certification_date", -1)],
+    )
+    if not enr:
+        enr = await db.enrollments.find_one({"trainee_id": trainee["_id"]})
+    if not enr:
+        return None
+    prog = await db.training_programs.find_one({"_id": enr["program_id"]})
+    sector = prog["sector"] if prog else "Unknown"
+    result = placement_risk.predict_risk(
+        attendance_percent=enr.get("attendance_percent", 0),
+        assessment_score=enr.get("assessment_score", 0),
+        course_sector=sector, district=trainee.get("district", "Unknown"),
+        gender=trainee.get("gender", "Unknown"), age=_age_from_dob(trainee.get("dob")),
+    )
+    result["basis"] = {"enrollment_id": str(enr["_id"]), "course_sector": sector,
+                       "attendance_percent": enr.get("attendance_percent"),
+                       "assessment_score": enr.get("assessment_score"),
+                       "certified": enr.get("certified")}
+    return result
+
+
+@api.get("/analytics/trainee/{trainee_id}/risk")
+async def trainee_risk(trainee_id: str, user: dict = Depends(get_current_user)):
+    tid = oid(trainee_id)
+    await assert_trainee_access(user, tid)
+    trainee = await db.trainees.find_one({"_id": tid}, {"phone_number": 0})
+    if not trainee:
+        raise HTTPException(status_code=404, detail="Trainee not found")
+    risk = await _trainee_risk(trainee)
+    if risk is None:
+        raise HTTPException(status_code=400, detail="Trainee has no enrollment to assess")
+    return {"trainee_id": trainee_id, "full_name": trainee["full_name"],
+            "district": trainee.get("district"), "risk": risk}
+
+
+@api.get("/analytics/provider/{provider_id}/at-risk-trainees")
+async def at_risk_trainees(provider_id: str, level: str = Query("high", pattern="^(high|medium|all)$"),
+                           limit: int = Query(50, le=200), user: dict = Depends(get_current_user)):
+    _authorize_provider_view(user, provider_id)
+    provider = await db.training_providers.find_one({"_id": oid(provider_id)})
+    if not provider:
+        raise HTTPException(status_code=404, detail="Provider not found")
+    if user["role"] == "district_admin" and provider["district"] != user.get("district"):
+        raise HTTPException(status_code=403, detail="Outside your district")
+
+    pids = await program_ids_for_provider(oid(provider_id))
+    tids = await trainee_ids_for_programs(pids)
+    trainees = await db.trainees.find({"_id": {"$in": tids}}, {"phone_number": 0}).to_list(100000)
+
+    wanted = {"high"} if level == "high" else ({"high", "medium"} if level == "medium" else {"high", "medium", "low"})
+    rows = []
+    for t in trainees:
+        risk = await _trainee_risk(t)
+        if not risk or risk["risk_level"] not in wanted:
+            continue
+        rows.append({"trainee_id": str(t["_id"]), "full_name": t["full_name"],
+                     "district": t.get("district"), "risk_score": risk["risk_score"],
+                     "risk_level": risk["risk_level"],
+                     "top_contributing_factors": risk["top_contributing_factors"],
+                     "course_sector": risk["basis"]["course_sector"]})
+    rows.sort(key=lambda r: r["risk_score"], reverse=True)
+    return {"provider_id": provider_id, "provider_name": provider["name"],
+            "level": level, "count": len(rows), "at_risk_trainees": rows[:limit]}
 
 
 # ---------------------------------------------------------------------------
