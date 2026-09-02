@@ -62,4 +62,11 @@ Every follow-up data point tagged: `verified` > `self_reported` > `unreachable`
 | state_admin | state@skilltrace.gov.in | State@123 |
 
 ## Phase log
-- **Phase 0 (done):** scaffolding, collections, indexes, encrypted PII, seed script.
+- **Phase 0/1 (done):** scaffolding, collections, indexes, encrypted PII, seed script.
+- **Phase 2 (done):** JWT auth + RBAC, full REST API (trainees, consent, enrollments,
+  follow-ups, employment + public verification, non-placement, analytics). Verified.
+- **Phase 3 (done):** three explainable ML modules inside the FastAPI service —
+  identity matching (rapidfuzz), free-text classification (keyword + TF-IDF LogReg),
+  placement-risk prediction (LogReg). Routes under `/api/ml/*`. Seed made
+  feature-correlated so the risk model has real signal. Metrics in
+  `ml_model_performance.md`. Verified (56/57 backend tests).

@@ -1,0 +1,73 @@
+{
+  "summary": "Backend-only testing of SkillTrace AI Phase 3 ML routes + Phase 2 regression against the external preview URL. Created pytest suite (45 tests, 2 files + conftest): 44 passed, 1 failed. All four /api/ml/* routes behave exactly as specified (health/metrics, 4/4 classification cases with correct sector guesses, weak=high risk 0.9x vs strong=low risk, match-identity auth + duplicate detection >=80 similarity with reasons). Phase 2 regression (4-role login, JWT, trainee scoping 150/provider-subset/district-Pune-only, followup raw-text classification + persistence, employment request-verification -> PUBLIC preview -> confirm -> reused-token 409, analytics endpoints) all pass. One CRITICAL auth defect found: brute-force lockout path throws 500.",
+  "backend_issues": {
+    "critical": [
+      {
+        "endpoint": "POST /api/auth/login",
+        "issue": "After 5 failed attempts the lockout check crashes with 500 Internal Server Error instead of returning 429. server.py:172 `rec['locked_until'] > datetime.now(timezone.utc)` compares a naive datetime read back from Mongo (motor client created without tz_aware=True) against an aware datetime -> TypeError: can't compare offset-naive and offset-aware datetimes. Reproduced deterministically on localhost:8001 (attempts 1-5 => 401, attempts 6+ => 500; traceback in /var/log/supervisor/backend.err.log). Fix: create AsyncIOMotorClient(..., tz_aware=True) or normalize with `locked_until.replace(tzinfo=timezone.utc)` as already done in verify_employment (server.py:517).",
+        "priority": "CRITICAL"
+      },
+      {
+        "endpoint": "POST /api/auth/login (rate limiting)",
+        "issue": "Brute-force protection is ineffective through the public ingress: lockout key is `f\"{request.client.host}:{email}\"`, and request.client.host is the ingress/proxy hop IP which rotates (observed 10.208.134.70 and 10.208.134.66 for the same client), so failures fragment across keys and the counter never reaches 5 (8 consecutive bad passwords all returned 401). Key on email alone (or X-Forwarded-For first hop) and add a TTL index on login_attempts.",
+        "priority": "HIGH"
+      }
+    ],
+    "minor": [
+      {
+        "endpoint": "CORS middleware (server.py:818)",
+        "issue": "allow_credentials=True combined with allow_origins=['*'] (CORS_ORIGINS=\"*\" in backend/.env). Verified response headers include both `Access-Control-Allow-Origin: *` and `Access-Control-Allow-Credentials: true` — browsers reject credentialed requests with wildcard origin. Harmless today because auth is Bearer-header, but will break the Phase 4 frontend if cookie auth is introduced. Use explicit origins."
+      },
+      {
+        "endpoint": "GET /api/followups",
+        "issue": "Status vocabulary is inconsistent: seed.py produces sent/responded/unreachable/escalated_to_field_agent while POST /api/followups/schedule creates status='pending'. A UI filtering on 'pending' will show nothing for seeded data."
+      },
+      {
+        "endpoint": "POST /api/auth/login (cookies)",
+        "issue": "get_current_user falls back to a cookie named access_token (server.py:72) but login never sets any cookie, so the httpOnly-cookie path is dead code. Either set the httpOnly/Secure/SameSite cookie on login or drop the fallback."
+      },
+      {
+        "endpoint": "POST /api/ml/classify-response",
+        "issue": "Empty raw_text returns predicted_category 'unemployed' with confidence from the ML fallback rather than an 'unknown'/low-confidence marker — no validation (min_length) on raw_text. Cosmetic/behavioural, not blocking."
+      }
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/conftest.py",
+    "/app/backend/tests/test_ml_routes.py",
+    "/app/backend/tests/test_phase2_regression.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [
+    "CRITICAL: fix the naive/aware datetime comparison in _check_lockout (server.py:172) — login currently 500s after 5 failed attempts; use tz_aware=True on the motor client or normalize tzinfo.",
+    "HIGH: make the lockout identifier proxy-safe (email-based or X-Forwarded-For) so brute-force protection actually engages behind the k8s ingress; add TTL/reset for login_attempts.",
+    "Replace CORS allow_origins='*' with explicit origins since allow_credentials=True.",
+    "Align followup status vocabulary between seed.py ('sent') and /followups/schedule ('pending').",
+    "Either set the httpOnly access_token cookie on login or remove the cookie fallback in get_current_user."
+  ],
+  "critical_code_review_comments": [
+    "server.py is 844 lines — split into routers (auth, trainees, followups, employment, analytics, ml) before Phase 4 grows it further.",
+    "ml/placement_risk.py opens a synchronous pymongo MongoClient inside the async FastAPI process (_load_training_frame) — training on startup blocks the event loop; move to an offline/threaded job.",
+    "POST /api/ml/match-identity loads every trainee document (to_list(100000)) and scores in Python on each request — O(N) per call and unbounded memory; add district/phone pre-filtering or indexing before scaling.",
+    "/api/ml/predict-risk and /api/ml/classify-response are unauthenticated; they don't leak PII but are compute-bound endpoints with no rate limiting.",
+    "Serialization is correct: trainee responses exclude phone_number and ObjectIds are stringified via ser(); no raw Mongo ObjectId leaks observed.",
+    "Password hashes verified in Mongo as bcrypt $2b$12$ (playbook-compliant); no hash-format issues."
+  ],
+  "updated_files": [
+    "/app/backend/tests/conftest.py",
+    "/app/backend/tests/test_ml_routes.py",
+    "/app/backend/tests/test_phase2_regression.py"
+  ],
+  "success_rate": {"backend": "98% (44/45 tests; the single failure is the auth lockout defect)", "frontend": "not tested (no frontend yet)"},
+  "seed_data_creation": "Used existing seed (150 trainees). Tests mutated data: 1 new employment_record 'TEST_Bakery Pvt Ltd' (verified via public token flow), its verification_token consumed, 1-2 seeded followups moved from status 'sent' to 'responded', and a few TEST_lock_*@example.com rows in login_attempts. Run `cd /app/backend && python seed.py` to reset.",
+  "should_call_test_agent_after_fix": true,
+  "should_main_agent_self_test": false,
+  "test_credentials": "/app/memory/test_credentials.md present and valid — all 4 accounts (admin/provider/district/state @skilltrace.gov.in) log in successfully and return JWT access_token in the body.",
+  "context_for_next_testing_agent": "Suite lives in /app/backend/tests (conftest.py exposes API base URL + `tokens`/`admin_headers`/`provider_headers` session fixtures; pytest.ini runs -n 2 --dist loadscope). Run `cd /app/backend && python -m pytest tests/ -v`. Only TestAuth::test_brute_force_lockout_after_5_failures fails and it documents the real 500/lockout bug — re-run it after the datetime fix (expect 401 x5 then 429). Followups seeded with status 'sent' (not 'pending'). ML artifacts already trained in /app/backend/ml/artifacts.",
+  "rca_of_the_issue": "Lockout 500: login_attempts.locked_until is written as an aware UTC datetime but read back naive because AsyncIOMotorClient is constructed without tz_aware=True; the comparison in _check_lockout then raises TypeError which FastAPI surfaces as 500. Confirmed via localhost repro (6th attempt = 500) and backend.err.log traceback. Secondary cause of the externally observed 'no lockout at all': request.client.host is the ingress hop IP and rotates, so the composite identifier changes and the failure counter never accumulates to 5 through the public URL."
+}

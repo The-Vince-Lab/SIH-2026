@@ -25,12 +25,12 @@ from bson.errors import InvalidId
 from auth import create_access_token, decode_token
 from security import hash_password, verify_password, encrypt_phone, mask_phone
 from db import ensure_indexes
-from ml import text_classifier
+from ml import text_classifier, identity_matching, response_classifier, placement_risk
 
 # ---------------------------------------------------------------------------
 # App / DB setup
 # ---------------------------------------------------------------------------
-client = AsyncIOMotorClient(os.environ["MONGO_URL"])
+client = AsyncIOMotorClient(os.environ["MONGO_URL"], tz_aware=True)
 db = client[os.environ["DB_NAME"]]
 
 app = FastAPI(title="SkillTrace AI API")
@@ -169,14 +169,20 @@ async def register(body: RegisterBody, admin: dict = Depends(require_role("super
 async def _check_lockout(identifier: str):
     rec = await db.login_attempts.find_one({"identifier": identifier})
     if rec and rec.get("count", 0) >= 5:
-        if rec.get("locked_until") and rec["locked_until"] > datetime.now(timezone.utc):
-            raise HTTPException(status_code=429, detail="Too many failed attempts. Try again later.")
+        locked = rec.get("locked_until")
+        if locked is not None:
+            if locked.tzinfo is None:
+                locked = locked.replace(tzinfo=timezone.utc)
+            if locked > datetime.now(timezone.utc):
+                raise HTTPException(status_code=429, detail="Too many failed attempts. Try again later.")
 
 
 async def _register_failure(identifier: str):
+    now = datetime.now(timezone.utc)
     await db.login_attempts.update_one(
         {"identifier": identifier},
-        {"$inc": {"count": 1}, "$set": {"locked_until": datetime.now(timezone.utc) + timedelta(minutes=15)}},
+        {"$inc": {"count": 1},
+         "$set": {"locked_until": now + timedelta(minutes=15), "expires_at": now + timedelta(minutes=30)}},
         upsert=True,
     )
 
@@ -184,7 +190,7 @@ async def _register_failure(identifier: str):
 @api.post("/auth/login")
 async def login(body: LoginBody, request: Request):
     email = body.email.lower()
-    identifier = f"{request.client.host}:{email}"
+    identifier = email  # proxy-safe: ingress hop IP rotates, so key on email only
     await _check_lockout(identifier)
     user = await db.users.find_one({"email": email})
     if not user or not verify_password(body.password, user["password_hash"]):
@@ -759,6 +765,55 @@ async def list_programs(user: dict = Depends(get_current_user), provider_id: Opt
     return ser(await db.training_programs.find(q).to_list(200))
 
 
+# ===========================================================================
+# ML routes (standalone testing via Swagger; same-process import elsewhere)
+# ===========================================================================
+class MatchIdentityBody(BaseModel):
+    name: str
+    phone_last4: Optional[str] = None
+    dob: Optional[str] = None
+    district: Optional[str] = None
+
+
+@api.post("/ml/match-identity")
+async def ml_match_identity(body: MatchIdentityBody, user: dict = Depends(get_current_user)):
+    records = await db.trainees.find({}, {"full_name": 1, "phone_masked": 1, "dob": 1, "district": 1}).to_list(100000)
+    return identity_matching.match_identity(body.name, body.phone_last4, body.dob, body.district, records)
+
+
+class ClassifyBody(BaseModel):
+    raw_text: str
+
+
+@api.post("/ml/classify-response")
+async def ml_classify(body: ClassifyBody):
+    return response_classifier.classify_response(body.raw_text)
+
+
+class PredictRiskBody(BaseModel):
+    attendance_percent: float
+    assessment_score: float
+    course_sector: str
+    district: str
+    gender: str
+    age: int
+
+
+@api.post("/ml/predict-risk")
+async def ml_predict(body: PredictRiskBody):
+    return placement_risk.predict_risk(**body.model_dump())
+
+
+@api.get("/ml/health")
+async def ml_health():
+    ready = {"placement_risk": placement_risk.is_ready(),
+             "response_classifier": response_classifier.is_ready()}
+    out = {"status": "ok" if all(ready.values()) else "degraded", "models_ready": ready}
+    if placement_risk.is_ready():
+        out["placement_risk_metrics"] = placement_risk.get_metrics()
+    return out
+
+
 @api.get("/")
 async def root():
     return {"service": "SkillTrace AI API", "status": "ok"}
@@ -767,7 +822,7 @@ async def root():
 # ---------------------------------------------------------------------------
 app.include_router(api)
 app.add_middleware(
-    CORSMiddleware, allow_credentials=True,
+    CORSMiddleware, allow_credentials=False,
     allow_origins=os.environ.get("CORS_ORIGINS", "*").split(","),
     allow_methods=["*"], allow_headers=["*"],
 )
@@ -779,7 +834,14 @@ logger = logging.getLogger(__name__)
 @app.on_event("startup")
 async def startup():
     await ensure_indexes(db)
-    logger.info("SkillTrace AI API started; indexes ensured.")
+    try:
+        if not placement_risk.is_ready():
+            placement_risk.train()
+        if not response_classifier.is_ready():
+            response_classifier.train()
+    except Exception as exc:  # pragma: no cover
+        logger.warning("ML model warm-up skipped: %s", exc)
+    logger.info("SkillTrace AI API started; indexes ensured; ML models ready.")
 
 
 @app.on_event("shutdown")

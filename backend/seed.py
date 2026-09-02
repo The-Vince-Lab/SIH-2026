@@ -12,6 +12,7 @@ Creates all collections, applies indexes, and inserts realistic synthetic data:
 
 Idempotent: clears SkillTrace collections before re-seeding.
 """
+import math
 import os
 import random
 from datetime import datetime, timedelta, timezone
@@ -131,8 +132,16 @@ def seed():
         })
 
     # ---- Trainees (150) + enrollments + outcomes -------------------------
-    outcomes = (["placed"] * 90) + (["unreachable"] * 22) + (["not_placed"] * 38)  # 150
-    random.shuffle(outcomes)
+    # Outcome is feature-driven (attendance, assessment, sector) so the risk
+    # model has real, defensible signal. ~15% unreachable independent of features.
+    SECTOR_BIAS = {
+        "IT/ITES": 0.9, "Healthcare": 0.7, "Electronics": 0.5, "Automotive": 0.4,
+        "Retail": 0.2, "Hospitality": 0.1, "Beauty & Wellness": 0.0,
+        "Welding": -0.1, "Apparel": -0.2, "Construction": -0.4,
+    }
+
+    def sigmoid(x):
+        return 1 / (1 + math.exp(-x))
 
     for n in range(150):
         gender = random.choice(["Male", "Female"])
@@ -161,26 +170,40 @@ def seed():
                 "performed_by": "system_intake",
             })
 
-        # Enrollment (a few trainees enrolled in 2 programs)
+        # Enrollment(s) — generate stats first (a few trainees enrolled in 2 programs)
         n_programs = 2 if random.random() < 0.12 else 1
         chosen = random.sample(programs, n_programs)
-        outcome = outcomes[n]
-
+        enroll_specs = []
         for prog in chosen:
-            certified = random.random() > 0.1
+            att = round(random.uniform(50, 99), 1)
+            score = round(random.uniform(35, 98), 1)
+            certified = random.random() > 0.08 and score >= 40
             cert_date = rand_date(360, 180) if certified else None
+            enroll_specs.append((prog, att, score, certified, cert_date))
+
+        avg_att = sum(s[1] for s in enroll_specs) / len(enroll_specs)
+        avg_score = sum(s[2] for s in enroll_specs) / len(enroll_specs)
+        sector_bias = SECTOR_BIAS.get(enroll_specs[0][0]["sector"], 0)
+
+        if random.random() < 0.15:
+            outcome = "unreachable"
+        else:
+            z = (-0.2 + 2.4 * ((avg_att - 75) / 20) + 2.2 * ((avg_score - 68) / 20)
+                 + sector_bias + random.gauss(0, 0.4))
+            outcome = "placed" if random.random() < sigmoid(z) else "not_placed"
+
+        for (prog, att, score, certified, cert_date) in enroll_specs:
             eid = ObjectId()
             db.enrollments.insert_one({
                 "_id": eid, "trainee_id": tid, "program_id": prog["_id"],
-                "attendance_percent": round(random.uniform(55, 99), 1),
-                "assessment_score": round(random.uniform(40, 98), 1),
+                "attendance_percent": att, "assessment_score": score,
                 "certified": certified, "certification_date": cert_date,
             })
             if certified:
                 _seed_followups(tid, eid, prog, outcome)
 
         # Employment / non-placement outcome (once per trainee)
-        _seed_outcome(tid, chosen[0], outcome)
+        _seed_outcome(tid, enroll_specs[0][0], outcome)
 
     # ---- System users (one per role) -------------------------------------
     provider_user_prov = providers[0]

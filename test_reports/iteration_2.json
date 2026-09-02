@@ -1,0 +1,50 @@
+{
+  "summary": "Backend-only fix verification of the brute-force lockout bug + full regression. Added /app/backend/tests/test_auth_lockout.py (12 tests) and re-ran the whole suite against the public preview URL: 57 tests, 56 passed, 1 failed (the failure is the pre-existing CORS wildcard+credentials config issue, not the lockout fix). LOCKOUT FIX CONFIRMED: throwaway email locktest@skilltrace.gov.in returned 401 x5 then 429 on attempts 6,7,8,9 with ZERO 500s; a throwaway REAL account (registered via /api/auth/register) returned 429 even with the CORRECT password while locked; provider@skilltrace.gov.in logged in successfully (200) while another email was locked, proving per-email keying; after clearing login_attempts the locked account logged in again (200); all 4 seeded accounts obtain valid JWTs (3-segment token, correct role, no password_hash leak). login_attempts has both the `identifier` index and the TTL `expires_at` (expireAfterSeconds:0) index. Admin password hash verified as bcrypt $2b$12$. ML regression: all 4 /api/ml/* routes still pass (health+metrics, 4/4 classify cases, weak=high/strong=low risk, match-identity 401 unauth + duplicate detection). Phase 2 regression (trainee scoping, followups, employment verification token flow, analytics) all pass, including the previously failing TestAuth::test_brute_force_lockout_after_5_failures which now sees 401x5 -> 429.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {
+        "endpoint": "CORS middleware (server.py:825-826)",
+        "issue": "STILL OPEN from iteration 1: allow_credentials=True with allow_origins from CORS_ORIGINS=\"*\". Verified on localhost:8001 AND through the public URL that a POST /api/auth/login with Origin: https://evil.example.com returns `access-control-allow-origin: *` together with `access-control-allow-credentials: true` — browsers reject credentialed requests under a wildcard origin. Harmless today (Bearer-header auth) but blocks any future cookie auth. Set CORS_ORIGINS to the explicit preview/prod origins. Covered by TestLockoutInfra::test_cors_credentials_config (currently failing by design to document this)."
+      },
+      {
+        "endpoint": "POST /api/auth/login (cookies)",
+        "issue": "STILL OPEN: get_current_user (server.py:72) falls back to a cookie named access_token, but login never calls set_cookie (only Cloudflare's __cf_bm appears). Playbook item 'httpOnly cookie set on login' is NOT satisfied — either set httpOnly/Secure/SameSite cookie or remove the dead fallback."
+      },
+      {
+        "endpoint": "POST /api/auth/login (lockout UX)",
+        "issue": "Minor: _register_failure re-sets locked_until on EVERY failure and the 429 response body/headers give no Retry-After or remaining-time hint. Also the counter never resets except via the 30-min TTL/success, so lockout effectively extends indefinitely while an attacker keeps trying (acceptable security-wise, but a legitimate user cannot see when it clears)."
+      },
+      {
+        "endpoint": "seed.py",
+        "issue": "Informational: seed.py achieves admin-password idempotency by wiping the users collection (clear()) then insert_one, rather than an upsert/update of an existing admin. Works for the demo but destroys any user created after seeding (e.g. real registrations)."
+      }
+    ]
+  },
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/test_auth_lockout.py",
+    "/app/backend/tests/test_ml_routes.py",
+    "/app/backend/tests/test_phase2_regression.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [
+    "Replace CORS_ORIGINS=\"*\" with explicit origins (or set allow_credentials=False) — only remaining assertion failure in the suite.",
+    "Set the httpOnly access_token cookie on login or delete the cookie fallback in get_current_user.",
+    "Optional: add Retry-After / remaining-lockout-seconds to the 429 response for UX."
+  ],
+  "critical_code_review_comments": [
+    "Lockout implementation now correct: tz_aware=True motor client + tzinfo normalization in _check_lockout + email-only identifier + TTL index — verified end-to-end through the ingress.",
+    "server.py is still 850 lines; split into routers (auth/trainees/followups/employment/analytics/ml) before Phase 4.",
+    "ml/placement_risk.py still opens a synchronous pymongo client inside the async process at startup (blocks event loop).",
+    "POST /api/ml/match-identity still loads all trainees per request (to_list(100000)) — O(N) per call."
+  ],
+  "updated_files": ["/app/backend/tests/test_auth_lockout.py"],
+  "success_rate": {"backend": "98% (56/57; the single failure documents the CORS wildcard+credentials config, no functional endpoint failure)", "frontend": "not tested (backend-only request)"},
+  "seed_data_creation": "Created + deleted one throwaway user test_lock_<rand>@skilltrace.gov.in via /api/auth/register. Regression tests again created a TEST_ employment record and flipped a seeded followup to 'responded'. Environment RESET afterwards: `python seed.py` re-run and `db.login_attempts.deleteMany({})` executed — all 4 demo accounts confirmed logging in, no lockout state left.",
+  "should_call_test_agent_after_fix": false,
+  "should_main_agent_self_test": true,
+  "test_credentials": "/app/memory/test_credentials.md valid; all 4 accounts return JWTs after reset.",
+  "context_for_next_testing_agent": "Suite: /app/backend/tests (conftest.py + test_ml_routes.py + test_phase2_regression.py + NEW test_auth_lockout.py). Run `cd /app/backend && python -m pytest tests/ -v`. Only TestLockoutInfra::test_cors_credentials_config fails and it intentionally documents the wildcard-CORS+credentials config. IMPORTANT: test_auth_lockout locks locktest@skilltrace.gov.in for 15 min (harmless, non-existent user); if you re-run auth tests, clear state with mongosh test_database --eval 'db.login_attempts.deleteMany({})'. Never hammer the 4 demo accounts.",
+  "rca_of_the_issue": "Original 500 was a naive-vs-aware datetime comparison in _check_lockout plus a proxy-fragmented composite identifier. Both fixes verified: AsyncIOMotorClient(..., tz_aware=True) (server.py:33), tzinfo normalization (server.py:174-176), identifier = email only (server.py:193), and db.py TTL/identifier indexes. Lockout now engages at exactly 5 failures through the public ingress and is scoped per email."
+}

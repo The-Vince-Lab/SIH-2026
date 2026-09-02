@@ -26,4 +26,5 @@ async def ensure_indexes(db) -> None:
     await db.training_programs.create_index("provider_id")
     await db.consent_logs.create_index("trainee_id")
     await db.login_attempts.create_index("identifier")
+    await db.login_attempts.create_index("expires_at", expireAfterSeconds=0)
     await db.password_reset_tokens.create_index("expires_at", expireAfterSeconds=0)
