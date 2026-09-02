@@ -1,0 +1,137 @@
+{
+  "project_name": "SkillTrace AI",
+  "app_archetype": "Civic-Tech Governance & Employment Impact Analytics",
+  "context_type": "DASHBOARDS & ADMIN PANELS + CITIZEN/EMPLOYER INTERACTIVE FLOWS",
+  "theme_strategy": {
+    "default_mode": "light",
+    "rationale": "Indian government portals and civic decision-makers demand clean, paper-credible, crisp clarity. High readability in high-ambient offices with zero visual fatigue.",
+    "theme_support": "Clean crisp light default with subtle warm stone backdrop + dark mode capability."
+  },
+  "typography": {
+    "pairing_strategy": "The Soft Utility & Civic Authority",
+    "heading_font": "Outfit, system-ui, -apple-system, sans-serif",
+    "body_font": "Plus Jakarta Sans, Inter, system-ui, sans-serif",
+    "mono_font": "JetBrains Mono, Menlo, monospace",
+    "rules": {
+      "H1": "text-3xl sm:text-4xl lg:text-5xl font-bold tracking-tight text-slate-900",
+      "H2": "text-2xl sm:text-3xl font-semibold tracking-tight text-slate-900",
+      "H3": "text-lg sm:text-xl font-semibold text-slate-800",
+      "H4": "text-base sm:text-lg font-medium text-slate-800",
+      "body": "text-sm sm:text-base text-slate-600 leading-relaxed",
+      "caption": "text-xs font-medium uppercase tracking-wider text-slate-500",
+      "badge": "text-xs font-semibold px-2.5 py-0.5 rounded-full"
+    }
+  },
+  "colors": {
+    "archetype": "SWISS & HIGH-CONTRAST + CIVIC TRUST ACCENTS",
+    "palette": {
+      "background": "#F8FAFC",
+      "surface": "#FFFFFF",
+      "surface_elevated": "#F1F5F9",
+      "border": "#E2E8F0",
+      "border_subtle": "#CBD5E1",
+      "text_primary": "#0F172A",
+      "text_secondary": "#475569",
+      "text_muted": "#64748B",
+      "brand_primary": "#1E3A8A",
+      "brand_primary_hover": "#172554",
+      "brand_primary_foreground": "#FFFFFF",
+      "saffron_accent": "#D97706",
+      "india_green": "#15803D"
+    },
+    "confidence_tier_badges": {
+      "verified": {
+        "bg": "bg-emerald-50 border-emerald-200 text-emerald-800",
+        "dot": "bg-emerald-500",
+        "label": "Verified (Employer/EPFO)",
+        "score_range": "Score: 90-100%"
+      },
+      "self_reported": {
+        "bg": "bg-amber-50 border-amber-200 text-amber-800",
+        "dot": "bg-amber-500",
+        "label": "Self-Reported (SMS/WhatsApp)",
+        "score_range": "Score: 60-89%"
+      },
+      "unreachable": {
+        "bg": "bg-rose-50 border-rose-200 text-rose-800",
+        "dot": "bg-rose-500",
+        "label": "Unreachable / Missing Data",
+        "score_range": "Score: <60%"
+      }
+    },
+    "risk_level_badges": {
+      "high": "bg-red-50 border-red-200 text-red-700 font-semibold",
+      "medium": "bg-amber-50 border-amber-200 text-amber-700 font-medium",
+      "low": "bg-emerald-50 border-emerald-200 text-emerald-700 font-medium"
+    },
+    "charts_palette": {
+      "verified": "#10B981",
+      "self_reported": "#F59E0B",
+      "unreachable": "#F43F5E",
+      "primary_bar": "#1E3A8A",
+      "secondary_bar": "#3B82F6",
+      "accent_bar": "#0284C7",
+      "grid_line": "#E2E8F0"
+    }
+  },
+  "layout_and_grids": {
+    "mode": "MODE B: High Density Civic Data Grid",
+    "container_padding": "max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 sm:py-8",
+    "kpi_grid": "grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 sm:gap-6",
+    "analytics_bento": "grid grid-cols-1 lg:grid-cols-12 gap-6",
+    "card_styling": "bg-white rounded-xl border border-slate-200/90 shadow-sm hover:shadow transition-shadow p-5 sm:p-6",
+    "header_styling": "sticky top-0 z-40 bg-white/90 backdrop-blur-md border-b border-slate-200 shadow-xs"
+  },
+  "components_structure": {
+    "Navbar": "Top navigation with Emblem/SkillTrace logo, Role badge switcher (Admin, District Officer, Training Provider), Quick stats pill, User Avatar & Logout",
+    "AuthLogin": "Government/Provider dual login screen with demo 1-click role switcher (Admin, District, Provider) for instant evaluation",
+    "ProviderDashboard": "Trainees list with real-time confidence scores, 'Enroll New Trainee' modal with Consent signature/duplicate fuzzy AI detector, 'At-Risk Trainees' AI panel, 'Run Follow-Up Batch' simulator trigger",
+    "DistrictAdminDashboard": "Comprehensive filters (District, Sector, Course, Gender, Date Range), Recharts charts (Placement rate by Provider, Wage distribution, Non-placement reasons donut, District ranking table, Confidence breakdown)",
+    "TraineeProfileJourney": "Single Trainee 360 view: Enrollment -> Training -> 1mo -> 3mo -> 6mo -> 12mo longitudinal timeline with employer confirmation stamp and wage progression curve",
+    "WhatsAppMessagingSimulator": "Interactive WhatsApp chat simulator showcasing AI automated follow-up at 3mo/6mo, structured quick-response chips + natural Hindi/Hinglish/English free-text classification with sentiment & confidence tagging",
+    "PublicEmployerVerify": "Lightweight /verify/:token micro-page with zero friction for employers (1-click 'Confirm Employment', designation & wage bracket check, no password needed)",
+    "ConsentDuplicateModal": "Consent proof audit viewer and Fuzzy Matching duplicate resolver (showing matching Aadhaar hash / Phone / Name match %)"
+  },
+  "image_urls": {
+    "civic_emblem_bg": {
+      "url": "https://images.unsplash.com/photo-1760872646618-13594fc00567?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NTY2Njl8MHwxfHNlYXJjaHwxfHxnb3Zlcm5tZW50JTIwb2ZmaWNpYWwlMjBvZmZpY2UlMjBpbmRpYXxlbnwwfHx8fDE3ODgzOTAxOTJ8MA&ixlib=rb-4.1.0&q=85",
+      "category": "Hero / Login Background Scrim",
+      "description": "Grand administrative heritage building with sandstone columns"
+    },
+    "trainee_demo_avatar_1": {
+      "url": "https://images.unsplash.com/photo-1737574994780-e31827afaed7?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjAzMzl8MHwxfHNlYXJjaHwzfHxpbmRpYW4lMjB5b3VuZyUyMHByb2Zlc3Npb25hbCUyMGNvbXB1dGVyJTIwd29ya2VyfGVufDB8fHx8MTc4ODM5MDE5NXww&ixlib=rb-4.1.0&q=85",
+      "category": "Trainee Profile Avatar",
+      "description": "Young Indian professional at workplace desk"
+    },
+    "trainee_demo_avatar_2": {
+      "url": "https://images.unsplash.com/photo-1737308584108-96f61d420638?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjAzMzl8MHwxfHNlYXJjaHwyfHxpbmRpYW4lMjB5b3VuZyUyMHByb2Zlc3Npb25hbCUyMGNvbXB1dGVyJTIwd29ya2VyfGVufDB8fHx8MTc4ODM5MDE5NXww&ixlib=rb-4.1.0&q=85",
+      "category": "Trainee Profile Avatar",
+      "description": "Young Indian developer / technician with spectacles"
+    }
+  },
+  "testing_attributes_contract": {
+    "rule": "Every interactive button, input, tab, filter, modal trigger, table row, and metric card MUST have a specific 'data-testid' attribute in kebab-case.",
+    "examples": [
+      "data-testid=\"role-switcher-admin\"",
+      "data-testid=\"role-switcher-provider\"",
+      "data-testid=\"role-switcher-district\"",
+      "data-testid=\"enroll-trainee-button\"",
+      "data-testid=\"consent-checkbox\"",
+      "data-testid=\"trainee-table-row-1\"",
+      "data-testid=\"confidence-badge-verified\"",
+      "data-testid=\"filter-district-select\"",
+      "data-testid=\"whatsapp-simulator-send-btn\"",
+      "data-testid=\"whatsapp-quick-reply-employed\"",
+      "data-testid=\"employer-verify-yes-btn\"",
+      "data-testid=\"employer-verify-submit-btn\"",
+      "data-testid=\"run-followup-cycle-btn\""
+    ]
+  },
+  "UNIVERSAL_GUIDELINES_FOR_MAIN_AGENT": {
+    "clarity_over_flash": "Prioritize high-density data tables, clear filters, explainable AI tooltips, and seamless state changes. Judges need to see the longitudinal tracking story instantly.",
+    "no_hidden_missing_data": "SkillTrace AI core thesis is honest data transparency. Always display verified vs self-reported vs unreachable with clear color-coded indicators.",
+    "recharts_configuration": "Use ResponsiveContainer, CartesianGrid with strokeDasharray='3 3' stroke='#E2E8F0', custom Tooltip styled with bg-white border border-slate-200 rounded-lg shadow-md p-2, Legend with rounded icon type.",
+    "interactive_whatsapp": "The WhatsApp simulation should feel live: allow typing free-form answers (e.g., 'haan job lag gayi 18k salary TCS me' or 'No looking for work') which triggers the mock ML classifier showing Intent, Extracted Wage, and Confidence Score.",
+    "seamless_mock_mode": "All flows (enrollment, duplicate detection, AI follow-up dispatch, verification link click, report export) must function end-to-end without page crashes."
+  }
+}

@@ -1,0 +1,38 @@
+{
+  "summary": "Frontend-only re-test (iteration 5) of SkillTrace AI on the public URL, focused on verifying the 5 fixes from iteration_4 plus regression. VERIFIED FIXED: (1) CRITICAL provider enroll now completes end-to-end (toast 'Trainee enrolled with consent captured', row appears in My Trainees, trainee stamped with provider_id) AND the duplicate-detection path works (duplicate-warning -> dup-force-create-btn -> enrollment completes, modal closes); DB confirmed 2 trainees + 2 enrollments + 2 consent logs created. (2) HIGH bogus JWT no longer crashes: localStorage skilltrace_token='bogus.token.value' + reload /provider -> clean redirect to /login, zero pageerrors, no 'Cannot read properties of null'. (3) MEDIUM stale quick-reply chips fixed: after a free-text reply only the CURRENT question's chips render (status chips 0, wage chips 4), and after selecting wage all chip groups disappear. (4) MEDIUM follow-up cycle now scoped to the caller provider: enrollments_processed=33 (was 139), returns in ~1.2s. (5) ethics/LOW gender factor gone: risk cards and /analytics/trainee/{id}/risk top factors show only attendance/score/sector/district for 6 sampled high-risk trainees. Regression pass: provider KPIs + 36-row trainee table + at-risk panel (19 high-risk), admin dashboard 4 KPIs + 6 Recharts render and react to district/gender filters (152 -> 41 -> 23), public /verify/:token full lifecycle (valid -> verified -> already responded -> invalid token), provider->/admin RBAC bounce back to /provider, logout clears token and returns to /login. One NEW medium bug found in MessagingSimulator (chat transcript reset wipes the user's free-text bubble; can also leave the chat with no chips). All QA_ data cleaned (trainees back to 150, QA employer + test employment record removed).",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "POST /api/followups/schedule", "issue": "Still returns followups_created=0 while enrollments_processed=33, so the UI toast reads 'Follow-up cycle run: 0 check-ins scheduled across 33 certified trainees'. Scoping is fixed; consider surfacing 'nothing due' as an info toast instead of a success with 0 (cosmetic, pre-existing)."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "MessagingSimulator", "issue": "The user's free-text reply bubble is missing from the transcript. load() (useEffect + StrictMode double-mount) resolves a second time AFTER the user has interacted and does setMessages([greeting]), wiping already-pushed user messages. Observed transcript: greeting -> AI Classifier -> wage question, with the typed 'haan job lag gayi 18000 salary' bubble gone. In one run this reset also left the chat with the greeting but NO quick-reply chips (phase had advanced to 'wage' while messages were reset to the status greeting), i.e. the structured flow becomes unusable until reload. Fix: guard load() with a mounted/latest-request ref or only seed the greeting when messages.length === 0.", "selector": "[data-testid=\"sim-messages\"]", "priority": "MEDIUM"},
+      {"component": "TraineeProfile risk-card", "issue": "While the risk request is still in flight (or fails) the card renders 'No enrollment to assess', which is factually wrong for a trainee that does have an enrollment. Risk fetch is fire-and-forget (.catch(() => setRisk(null))) with no loading/error state. Add a skeleton/loading state and distinguish 'could not load risk' from 'no enrollment'.", "selector": "[data-testid=\"risk-card\"]", "priority": "LOW"}
+    ],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Admin dashboard (unfiltered)", "issues": ["'Non-Placement Reasons' donut renders blank on the initial unfiltered load in the screenshot (populates after a filter change) - verify the chart is not just late-animating on first paint"]},
+      {"screen": "Login", "issues": ["React console warning on every load: 'In HTML, <span> cannot be a child of <option>' (invalid DOM nesting inside a select option) - harmless but noisy"]}
+    ]
+  },
+  "test_report_links": ["/app/backend/tests/qa_make_token.py", "/app/backend/tests/qa_cleanup.py"],
+  "action_items": [
+    "MessagingSimulator: prevent the delayed load() from resetting messages after user interaction (mounted ref / seed greeting only when messages is empty)",
+    "TraineeProfile: add loading/error state for the risk fetch instead of falling back to 'No enrollment to assess'",
+    "Optional polish: follow-up cycle toast wording when 0 check-ins are due; fix invalid <span> inside <option> on Login"
+  ],
+  "critical_code_review_comments": [
+    "MessagingSimulator.load() unconditionally does setMessages([...]) inside an effect; any re-invocation (StrictMode, id change, late resolution) destroys conversation state. Seed once and keep phase/messages in sync.",
+    "TraineeProfile fires /analytics/trainee/{id}/risk outside the Promise.all with a silent catch, so a failed risk call is indistinguishable from 'no enrollment'."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "not tested (frontend-only request)", "frontend": "95%"},
+  "seed_data_creation": "Created 2 'QA_UI_Retest One' trainees (normal + force-create duplicate) and 1 verification token via qa_make_token.py; all removed afterwards with qa_cleanup.py plus manual deletion of the 'Employer (pending verification)' employment record created by the simulator test. DB back to 150 trainees / 126 employment records / 0 QA rows.",
+  "should_call_test_agent_after_fix": false,
+  "should_main_agent_self_test": true,
+  "test_credentials": "provider@skilltrace.gov.in / Provider@123, admin@skilltrace.gov.in / Admin@123 (from /app/memory/test_credentials.md)",
+  "context_for_next_testing_agent": "All 5 iteration_4 defects are confirmed fixed on the public URL. Remaining open items are the MessagingSimulator transcript-reset bug (user free-text bubble disappears / chips can vanish) and the risk-card loading-state wording. When testing the simulator, always wait_for_selector on [data-testid=whatsapp-quick-reply-employed] before counting chips - counting immediately after the simulator container appears gives a false 0. Verify tokens: python /app/backend/tests/qa_make_token.py; cleanup: python /app/backend/tests/qa_cleanup.py.",
+  "rca_of_the_issue": "Simulator bug RCA: `load` is a useCallback([traineeId]) invoked in useEffect; under React StrictMode the effect runs twice and the second async resolution lands after the user has already replied, calling setMessages([greeting]) and discarding pushUser/pushAI entries. Because `phase` is separate state and is NOT reset, the rebuilt greeting (chips:true) fails the `phase === 'status'` condition and no chips render at all - the exact 'no chips' state observed in one run."
+}

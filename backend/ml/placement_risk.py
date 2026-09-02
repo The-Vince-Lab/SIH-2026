@@ -155,6 +155,8 @@ def predict_risk(attendance_percent: float, assessment_score: float, course_sect
     for i in top_idx:
         if contribs[i] <= 0:
             break
+        if names[i].startswith("cat__gender_"):
+            continue  # never surface protected attributes as risk drivers
         factors.append(_readable_factor(names[i], raw))
         if len(factors) >= 3:
             break

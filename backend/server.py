@@ -116,8 +116,11 @@ async def accessible_trainee_ids(user: dict) -> Optional[List[ObjectId]]:
     if user["role"] == "provider":
         if not user.get("provider_id"):
             return []
-        pids = await program_ids_for_provider(ObjectId(user["provider_id"]))
-        return await trainee_ids_for_programs(pids)
+        pid = ObjectId(user["provider_id"])
+        pids = await program_ids_for_provider(pid)
+        via_enrollment = await trainee_ids_for_programs(pids)
+        owned = await db.trainees.distinct("_id", {"provider_id": pid})
+        return list({*via_enrollment, *owned})
     if user["role"] == "district_admin":
         docs = await db.trainees.find({"district": user.get("district")}, {"_id": 1}).to_list(100000)
         return [d["_id"] for d in docs]
@@ -248,6 +251,8 @@ async def create_trainee(body: TraineeBody, force: bool = Query(False, descripti
         "full_name": body.full_name, "phone_number": encrypt_phone(body.phone_number),
         "phone_masked": mask_phone(body.phone_number), "dob": body.dob, "gender": body.gender,
         "district": body.district, "state": body.state,
+        "provider_id": ObjectId(user["provider_id"]) if user.get("role") == "provider" and user.get("provider_id") else None,
+        "created_by": user["email"],
         "consent": {"given": body.consent.given, "timestamp": now if body.consent.given else None,
                     "scope": body.consent.scope if body.consent.given else []},
         "created_at": now,
@@ -391,9 +396,13 @@ class ScheduleBody(BaseModel):
 
 @api.post("/followups/schedule")
 async def schedule_followups(body: ScheduleBody, user: dict = Depends(require_role("district_admin", "state_admin", "super_admin", "provider"))):
-    query = {"certified": True, "certification_date": {"$ne": None}}
     if body.enrollment_id:
         query = {"_id": oid(body.enrollment_id)}
+    else:
+        query = {"certified": True, "certification_date": {"$ne": None}}
+        if user["role"] == "provider" and user.get("provider_id"):
+            pids = await program_ids_for_provider(ObjectId(user["provider_id"]))
+            query["program_id"] = {"$in": pids}
     enrollments = await db.enrollments.find(query).to_list(100000)
     created = 0
     for e in enrollments:
@@ -757,6 +766,122 @@ async def non_placement_analytics(user: dict = Depends(get_current_user), group_
             grouped.setdefault(key, {}).setdefault(r["reason_category"], 0)
             grouped[key][r["reason_category"]] += 1
     return {"group_by": group_by, "data": grouped}
+
+
+def _age_bucket(dob: Optional[str]) -> str:
+    if not dob:
+        return "Unknown"
+    try:
+        age = _age_from_dob(dob)
+        return "18-24" if age < 25 else ("25-34" if age < 35 else "35+")
+    except Exception:
+        return "Unknown"
+
+
+@api.get("/trainees-overview")
+async def trainees_overview(user: dict = Depends(get_current_user), provider_id: Optional[str] = None,
+                            limit: int = Query(500, le=1000)):
+    allowed = await accessible_trainee_ids(user)
+    q = {} if allowed is None else {"_id": {"$in": allowed}}
+    if provider_id:
+        pids = await program_ids_for_provider(oid(provider_id))
+        tids = await trainee_ids_for_programs(pids)
+        q["_id"] = {"$in": _intersect(q.get("_id"), tids)}
+    trainees = await db.trainees.find(q, {"phone_number": 0}).limit(limit).to_list(limit)
+    rows = []
+    for t in trainees:
+        enr = await db.enrollments.find_one({"trainee_id": t["_id"]}, sort=[("certified", -1), ("certification_date", -1)])
+        course = sector = att = score = None
+        certified = False
+        if enr:
+            prog = await db.training_programs.find_one({"_id": enr["program_id"]})
+            course = prog["course_name"] if prog else None
+            sector = prog["sector"] if prog else None
+            att = enr.get("attendance_percent")
+            score = enr.get("assessment_score")
+            certified = enr.get("certified", False)
+        fu = await db.followups.find_one({"trainee_id": t["_id"], "status": {"$ne": "pending"}},
+                                         sort=[("scheduled_date", -1)])
+        if not fu:
+            fu = await db.followups.find_one({"trainee_id": t["_id"]}, sort=[("scheduled_date", -1)])
+        rows.append({
+            "trainee_id": str(t["_id"]), "full_name": t["full_name"], "district": t.get("district"),
+            "gender": t.get("gender"), "consent_given": t.get("consent", {}).get("given", False),
+            "course_name": course, "sector": sector, "attendance_percent": att, "assessment_score": score,
+            "certified": certified,
+            "latest_followup_status": fu["status"] if fu else None,
+            "latest_followup_interval": fu.get("interval_label") if fu else None,
+            "confidence_score": fu["confidence_score"] if fu else "unreachable",
+        })
+    return {"total": len(rows), "items": rows}
+
+
+@api.get("/analytics/overview")
+async def analytics_overview(user: dict = Depends(get_current_user), district: Optional[str] = None,
+                             provider_id: Optional[str] = None, program_id: Optional[str] = None,
+                             gender: Optional[str] = None, age_group: Optional[str] = None):
+    allowed = await accessible_trainee_ids(user)
+    tquery = {} if allowed is None else {"_id": {"$in": allowed}}
+    if district:
+        tquery["district"] = district
+    if gender:
+        tquery["gender"] = gender
+    restrict = None
+    if program_id:
+        restrict = await trainee_ids_for_programs([oid(program_id)])
+    if provider_id:
+        pids = await program_ids_for_provider(oid(provider_id))
+        ids = await trainee_ids_for_programs(pids)
+        restrict = ids if restrict is None else [i for i in restrict if i in set(ids)]
+    if restrict is not None:
+        tquery["_id"] = {"$in": _intersect(tquery.get("_id"), restrict)}
+    trainees = await db.trainees.find(tquery, {"_id": 1, "district": 1, "dob": 1}).to_list(100000)
+    if age_group:
+        trainees = [t for t in trainees if _age_bucket(t.get("dob")) == age_group]
+    tids = [t["_id"] for t in trainees]
+    tset = set(tids)
+    totals = await compute_summary(tids)
+
+    prov_q = {"district": district} if district else {}
+    providers = await db.training_providers.find(prov_q).to_list(100)
+    by_provider = []
+    for p in providers:
+        pids = await program_ids_for_provider(p["_id"])
+        ptids = [i for i in await trainee_ids_for_programs(pids) if i in tset]
+        cs = await compute_summary(ptids)
+        if cs["total_trainees"]:
+            by_provider.append({"name": p["name"], "placement_rate": cs["placement_rate"], "total": cs["total_trainees"]})
+    by_provider.sort(key=lambda r: r["placement_rate"], reverse=True)
+
+    programs = await db.training_programs.find({}).to_list(200)
+    sector_groups: dict = {}
+    for pr in programs:
+        sector_groups.setdefault(pr["sector"], []).append(pr["_id"])
+    by_sector = []
+    for sector, pids in sector_groups.items():
+        stids = [i for i in await trainee_ids_for_programs(pids) if i in tset]
+        cs = await compute_summary(stids)
+        if cs["total_trainees"]:
+            by_sector.append({"sector": sector, "placement_rate": cs["placement_rate"], "total": cs["total_trainees"]})
+    by_sector.sort(key=lambda r: r["placement_rate"], reverse=True)
+
+    reasons = await db.non_placement_reasons.aggregate([
+        {"$match": {"trainee_id": {"$in": tids}}},
+        {"$group": {"_id": "$reason_category", "count": {"$sum": 1}}},
+    ]).to_list(20)
+    non_placement = {r["_id"]: r["count"] for r in reasons}
+
+    all_districts = await db.trainees.distinct("district", tquery)
+    district_ranking = []
+    for d in all_districts:
+        dtids = [t["_id"] for t in trainees if t.get("district") == d]
+        cs = await compute_summary(dtids)
+        district_ranking.append({"district": d, "placement_rate": cs["placement_rate"], "total": cs["total_trainees"]})
+    district_ranking.sort(key=lambda r: r["placement_rate"], reverse=True)
+
+    return {"totals": totals, "by_provider": by_provider, "by_sector": by_sector,
+            "wage_distribution": totals["wage_distribution"], "non_placement_reasons": non_placement,
+            "confidence_breakdown": totals["confidence_breakdown"], "district_ranking": district_ranking}
 
 
 # ---------------------------------------------------------------------------

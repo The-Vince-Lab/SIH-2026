@@ -1,0 +1,67 @@
+{
+  "summary": "Phase 5 frontend-only E2E testing of SkillTrace AI on the public URL. Covered: login (demo one-click + email/password + wrong-password toast), provider dashboard (KPIs, 36-row trainee table, confidence badges, at-risk panel with 17 high-risk rows, run follow-up cycle), enroll + duplicate-detection modal, messaging simulator (employed->wage->employer verification link, unemployed->reason, free-text ML classification), public employer verify page in a clean context (valid -> verified -> already-responded -> invalid token), admin analytics dashboard (4 KPIs, 6 Recharts, 5 filters, district ranking, provider drill-down), RBAC redirects both ways and logout. 2 HIGH bugs found: (1) provider can NEVER complete an enrollment (POST /enrollments -> 403, chicken-and-egg RBAC) leaving orphan trainee rows, (2) ProviderDashboard crashes with an uncaught TypeError (blank screen) when the JWT is invalid/expired. Everything else works. All QA_ test data cleaned (trainees back to 150).",
+  "backend_issues": {
+    "critical": [
+      {"endpoint": "POST /api/enrollments", "issue": "403 'Not authorized for this trainee' when a provider enrolls a BRAND-NEW trainee. accessible_trainee_ids() derives a provider's scope from trainees that already have an enrollment in the provider's programs, so a newly created trainee is never in scope -> chicken-and-egg. Provider enrollment (the core write flow of the app) is 100% broken, incl. the ?force=true duplicate path. Repro: /app/backend/tests/qa_enroll_repro.py (own program AND other program both 403). Fix: in assert_trainee_access for POST /enrollments, allow providers when the target program_id belongs to their provider_id (or stamp provider_id/created_by on the trainee at creation and use that for scoping).", "priority": "CRITICAL"}
+    ],
+    "minor": [
+      {"endpoint": "POST /api/trainees + POST /api/enrollments", "issue": "No transaction/rollback: the trainee document is inserted, then the enrollment 403s, leaving an orphan trainee with no enrollment (3 orphans created during this run, cleaned up). Either create trainee+enrollment atomically in one endpoint or delete the trainee on enrollment failure."},
+      {"endpoint": "POST /api/followups/schedule", "issue": "A provider-initiated 'Run Follow-Up Cycle' processed 139 certified trainees across ALL providers (not scoped to the caller's provider_id) and reported '0 check-ins scheduled'. Scope the cycle to the caller's provider and/or surface 'nothing due' instead of a success toast with 0."},
+      {"endpoint": "GET /api/analytics/trainee/{id}/risk", "issue": "top_contributing_factors includes 'Gender: Male' / age as risk drivers. A government-facing explainable model that surfaces gender as a placement-risk factor is a fairness/ethics red flag; either drop protected attributes from the explanation or label them clearly as cohort context."},
+      {"endpoint": "POST /api/ml/classify-response", "issue": "'haan job lag gayi 18k salary TCS me' -> sector_guess null (UI shows dash) and confidence 75% (keyword); 'nahi abhi tak koi kaam nahi mila' -> Unemployed but only 33% confidence via ml_fallback. Functional but the AI card looks weak in a demo."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "ProviderDashboard", "issue": "HIGH: With an invalid/expired JWT the dashboard renders summary.placement_rate on a null summary -> 'Uncaught TypeError: Cannot read properties of null (reading placement_rate)' and a blank/red error screen. The axios 401 interceptor clears localStorage but does NOT navigate, so the user only recovers by reloading a second time. Add an error state (retry + 'session expired' redirect to /login) and guard `if (!summary) return <ErrorState/>`.", "selector": "[data-testid=\"stat-placement-rate\"]", "priority": "HIGH"},
+      {"component": "EnrollTraineeModal", "issue": "Because POST /enrollments 403s, the modal shows the error toast 'Not authorized for this trainee' and stays open on the duplicate panel forever after clicking dup-force-create-btn; no way to know a trainee row was already created.", "selector": "[data-testid=\"dup-force-create-btn\"]", "priority": "HIGH"},
+      {"component": "MessagingSimulator", "issue": "Old quick-reply chip groups stay rendered and clickable after being answered (after a free-text reply there were 14 reason chips from two groups), allowing duplicate outcome submissions. Disable/hide chips of answered messages.", "selector": "[data-testid^=\"whatsapp-reason-\"]", "priority": "MEDIUM"},
+      {"component": "EnrollTraineeModal", "issue": "Console DOM validation error on every open: a <span> wrapper is rendered inside <option> in the program <select> ('In HTML, <span> cannot be a child of <option>'). Render option text into a variable/string instead of an inline expression.", "selector": "[data-testid=\"enroll-program\"] option", "priority": "LOW"}
+    ],
+    "integration_issues": [
+      {"flow": "Enroll New Trainee (new person and force-create duplicate)", "issue": "Never completes: POST /trainees 200 then POST /enrollments 403; toast 'Not authorized for this trainee'. Blocks the whole provider write path.", "affected_selectors": ["[data-testid=\"enroll-submit-btn\"]", "[data-testid=\"dup-force-create-btn\"]"]},
+      {"flow": "Session expiry", "issue": "No /auth/me revalidation on boot; user object is trusted from localStorage. Expired token -> API 401s -> ProviderDashboard crash instead of redirect to /login.", "affected_selectors": ["[data-testid=\"stat-placement-rate\"]"]}
+    ],
+    "design_issues": [
+      {"screen": "Provider dashboard (mobile 390px)", "issues": ["document.scrollWidth > clientWidth -> whole page scrolls horizontally on mobile; the trainee table should be the only horizontally scrollable region (wrap in min-w-0/overflow container)"]},
+      {"screen": "All authenticated screens", "issues": ["The sonner toast (top-right) overlays the navbar and visually covers the Logout button for ~4s"]},
+      {"screen": "Admin dashboard charts", "issues": ["When a filter narrows to one provider the single bar stretches the full chart width (set maxBarSize)", "Provider X-axis labels are clipped at the left edge of chart-by-provider ('...gha Training Academy')"]},
+      {"screen": "Enroll modal", "issues": ["Date of birth uses the native browser date picker (input type=date) instead of the shadcn Calendar/Popover used elsewhere in the design system; no min/max DOB validation"]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/qa_enroll_repro.py",
+    "/app/backend/tests/qa_risk_repro.py",
+    "/app/backend/tests/qa_make_token.py",
+    "/app/backend/tests/qa_cleanup.py"
+  ],
+  "action_items": [
+    "CRITICAL: fix provider RBAC for POST /api/enrollments so a provider can enroll a brand-new trainee (scope by program.provider_id or stamp provider on the trainee), then re-test enroll + force-create duplicate end to end.",
+    "CRITICAL: make trainee+enrollment creation atomic (or roll back the trainee) so failures don't leave orphan trainee rows.",
+    "HIGH: add null/error states to ProviderDashboard and make the axios 401 interceptor redirect to /login (plus optional /auth/me boot revalidation).",
+    "MEDIUM: disable answered quick-reply chip groups in MessagingSimulator to prevent duplicate submissions.",
+    "MEDIUM: scope POST /api/followups/schedule to the calling provider; don't toast success for 0 scheduled.",
+    "LOW: remove gender from the risk explanation, fix the <span> inside <option> DOM error, fix mobile horizontal overflow, move toasts below the navbar, add maxBarSize to bar charts, replace native date input with shadcn Calendar.",
+    "Recommended: re-seed (cd /app/backend && python seed.py) — the simulator flows I exercised wrote 3 real employment records (Manoj Chavan, Sonali Joshi, one more) and 1 non-placement reason on seeded trainees, and 1 employment record is now employer_verified=true."
+  ],
+  "critical_code_review_comments": [
+    "accessible_trainee_ids(): provider scope computed from existing enrollments makes creation of new trainee+enrollment impossible for the provider role — the RBAC model needs an ownership field on the trainee (provider_id/created_by) instead of deriving scope purely from enrollments.",
+    "ProviderDashboard.jsx renders summary.* without a null guard after a failed fetch (only `loading` is handled) — every API-failure path is an uncaught render crash. AdminDashboard/TraineeProfile correctly guard with `loading || !data`.",
+    "lib/api.js response interceptor clears the token on 401 but never navigates; AuthContext also trusts the localStorage user object without validating the JWT with /auth/me on boot.",
+    "EnrollTraineeModal.submit() posts the trainee first and the enrollment second with no compensating delete on failure — non-atomic write that pollutes the trainees collection.",
+    "MessagingSimulator chips are keyed on the message flag + global `phase`, so previously answered chip groups from earlier messages remain interactive; gate them per-message (e.g. m.answered)."
+  ],
+  "updated_files": [
+    "/app/backend/tests/qa_enroll_repro.py (new, repro script)",
+    "/app/backend/tests/qa_risk_repro.py (new, repro script)",
+    "/app/backend/tests/qa_make_token.py (new, generates a verification token for UI testing)",
+    "/app/backend/tests/qa_cleanup.py (new, QA data cleanup)"
+  ],
+  "success_rate": {"backend": "not re-tested (frontend-only request); 2 endpoint-level defects found incidentally", "frontend": "~85% (11/13 flows fully pass; enroll flow and expired-session handling fail)"},
+  "seed_data_creation": "Created and DELETED 3 QA_ trainees (QA_UI_Test Person x2, QA_UI_Repro Person) + their consent logs and 1 'QA_Test Employer Pvt Ltd' employment record. DB verified back to 150 trainees, 0 QA_ rows. NOT cleaned (intentional demo writes): 3 employment records + 1 non-placement reason created through the Messaging Simulator on seeded trainees Manoj Chavan / Sonali Joshi / one more, and one of them is employer_verified=true (Employer-Verified KPI moved 3 -> 4, admin verified 20). Re-seed if you want pristine numbers.",
+  "should_call_test_agent_after_fix": true,
+  "should_main_agent_self_test": false,
+  "test_credentials": "/app/memory/test_credentials.md valid; all 4 demo one-click logins work. Wrong-password toast verified ONCE with throwaway email qa_throwaway_user@example.com -> 'Invalid email or password' (demo accounts untouched, no lockout triggered).",
+  "context_for_next_testing_agent": "Frontend testids verified working: role-switcher-*, login-*, stat-*, trainee-table-row-N, confidence-badge-*, at-risk-row-N, simulate-btn-N, run-followup-cycle-btn, enroll-trainee-button/enroll-modal/enroll-* /consent-checkbox/enroll-submit-btn/duplicate-warning/dup-*, journey-timeline/timeline-node-N/risk-card/employment-card/open-simulator-btn, whatsapp-simulator/quick-reply-*/wage-* (ids contain '<' and '+' e.g. whatsapp-wage-<10k — prefer locator('[data-testid^=\"whatsapp-wage-\"]').nth(i))/whatsapp-freetext-input/whatsapp-simulator-send-btn/ml-classification-card/open-verify-link-btn, employer-verify-card/yes/no/verify-result/verify-error-msg, filter-*-select/chart-*/district-row-N/provider-drill-N, logout-button. Notes for scripts: risk-card and ML cards load async (poll up to 10s); toasts auto-dismiss in ~4s so poll [data-sonner-toast] every 500ms; generate a verification token with `python /app/backend/tests/qa_make_token.py`; clean QA data with `python /app/backend/tests/qa_cleanup.py`.",
+  "rca_of_the_issue": "Enroll failure RCA: server.py assert_trainee_access -> accessible_trainee_ids builds a provider's allowed trainee list as trainee_ids_for_programs(program_ids_for_provider(provider_id)), i.e. only trainees who ALREADY have an enrollment in that provider's programs. POST /api/enrollments calls assert_trainee_access BEFORE the enrollment exists, so a freshly created trainee is always outside the provider's scope -> 403. Verified with qa_enroll_repro.py: create trainee 200, then enrollment with the provider's OWN program -> 403. ProviderDashboard crash RCA: load() catches the API error and toasts, but leaves summary=null while `loading` flips to false, and the JSX dereferences summary.placement_rate -> uncaught TypeError and a blank error overlay; reproduced by setting localStorage.skilltrace_token='bogus.token.value' and reloading /provider."
+}

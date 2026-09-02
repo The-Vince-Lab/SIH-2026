@@ -76,3 +76,9 @@ Every follow-up data point tagged: `verified` > `self_reported` > `unreachable`
   `classify_response` (stores employment_type + sector_guess, `confidence_score=self_reported`);
   new `GET /api/analytics/trainee/:id/risk` and `GET /api/analytics/provider/:id/at-risk-trainees`.
   Verified end-to-end (71/71 backend tests).
+- **Phase 5 (done):** full React + Tailwind + Recharts frontend — JWT login with one-click
+  demo roles, Provider dashboard (trainees table, at-risk panel, enroll+consent+duplicate
+  flow, run follow-up cycle), WhatsApp-style Messaging Simulator (quick-reply + free-text ML),
+  public employer verification `/verify/:token`, District/State Admin analytics (6 Recharts +
+  filters + drill-down), Trainee journey timeline. Verified (95%); fixed provider-enroll RBAC,
+  expired-session crash, simulator state reset, and removed gender from risk explanations.
