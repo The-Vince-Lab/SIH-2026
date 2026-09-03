@@ -114,7 +114,7 @@ class TestMatchIdentity:
         assert r.status_code == 401
 
     def test_duplicate_detected_for_existing_trainee(self, client, admin_headers):
-        lst = client.get(f"{API}/trainees?limit=5", headers=admin_headers, timeout=60)
+        lst = client.get(f"{API}/trainees?district=Pune&limit=5", headers=admin_headers, timeout=60)
         assert lst.status_code == 200, lst.text
         items = lst.json()["items"]
         assert items, "no seeded trainees found"

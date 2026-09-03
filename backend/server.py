@@ -141,6 +141,16 @@ async def assert_trainee_access(user: dict, trainee_id: ObjectId):
         raise HTTPException(status_code=403, detail="Not authorized for this trainee")
 
 
+async def assert_consent(trainee_id: ObjectId, required_scope: Optional[str] = None):
+    """Enforce active consent (and optional scope) before collecting data."""
+    t = await db.trainees.find_one({"_id": trainee_id}, {"consent": 1})
+    c = (t or {}).get("consent", {})
+    if not c.get("given"):
+        raise HTTPException(status_code=403, detail="Trainee has not consented, or consent was revoked")
+    if required_scope and required_scope not in (c.get("scope") or []):
+        raise HTTPException(status_code=403, detail=f"Trainee has not consented to: {required_scope}")
+
+
 # ===========================================================================
 # 1. AUTH
 # ===========================================================================
@@ -282,6 +292,8 @@ async def list_trainees(
     skip: int = 0,
 ):
     query = {}
+    if user["role"] in ("state_admin", "super_admin") and not (provider_id or program_id or district):
+        raise HTTPException(status_code=403, detail="Trainee-level data requires drilling into a provider, course, or district")
     allowed = await accessible_trainee_ids(user)
     if allowed is not None:
         query["_id"] = {"$in": allowed}
@@ -313,6 +325,9 @@ async def get_trainee(trainee_id: str, user: dict = Depends(get_current_user)):
     doc = await db.trainees.find_one({"_id": tid}, {"phone_number": 0})
     if not doc:
         raise HTTPException(status_code=404, detail="Trainee not found")
+    await db.consent_logs.insert_one({"trainee_id": tid, "action": "accessed",
+                                      "timestamp": datetime.now(timezone.utc), "scope": [],
+                                      "performed_by": user["email"]})
     enrollments = await db.enrollments.find({"trainee_id": tid}).to_list(50)
     employment = await db.employment_records.find({"trainee_id": tid}).to_list(50)
     return {"trainee": ser(doc), "enrollments": ser(enrollments), "employment": ser(employment)}
@@ -364,8 +379,12 @@ _INTERVAL_ORDER = {"1_month": 1, "3_month": 3, "6_month": 6, "12_month": 12}
 async def wage_progression(trainee_id: str, user: dict = Depends(get_current_user)):
     tid = oid(trainee_id)
     await assert_trainee_access(user, tid)
-    if not await db.trainees.find_one({"_id": tid}, {"_id": 1}):
+    trainee = await db.trainees.find_one({"_id": tid}, {"consent": 1})
+    if not trainee:
         raise HTTPException(status_code=404, detail="Trainee not found")
+    wage_consent = bool(trainee.get("consent", {}).get("given") and "wage_data" in (trainee.get("consent", {}).get("scope") or []))
+    if not wage_consent:
+        return {"trainee_id": trainee_id, "wage_consent": False, "points": []}
     fus = await db.followups.find({"trainee_id": tid, "status": "responded"}).to_list(500)
     best = {}  # de-duplicate per interval (a trainee may have >1 enrollment) — keep latest response
     for f in fus:
@@ -381,7 +400,35 @@ async def wage_progression(trainee_id: str, user: dict = Depends(get_current_use
     points = sorted(best.values(), key=lambda p: p["months"])
     for p in points:
         p.pop("_ts", None)
-    return {"trainee_id": trainee_id, "points": points}
+    return {"trainee_id": trainee_id, "wage_consent": True, "points": points}
+
+
+@api.post("/trainees/{trainee_id}/revoke-consent")
+async def revoke_and_anonymize(trainee_id: str, user: dict = Depends(get_current_user)):
+    """Real DB anonymization: strips PII (name, phone, employer contacts) while
+    preserving anonymized aggregate rows so analytics counts do not break."""
+    tid = oid(trainee_id)
+    await assert_trainee_access(user, tid)
+    existing = await db.trainees.find_one({"_id": tid})
+    if not existing:
+        raise HTTPException(status_code=404, detail="Trainee not found")
+    if existing.get("anonymized"):
+        raise HTTPException(status_code=409, detail="Trainee already anonymized")
+    now = datetime.now(timezone.utc)
+    await db.trainees.update_one({"_id": tid}, {"$set": {
+        "full_name": f"Anonymized Trainee #{str(tid)[-4:]}",
+        "phone_number": None, "phone_masked": "REDACTED",
+        "anonymized": True, "anonymized_at": now,
+        "consent": {"given": False, "timestamp": None, "scope": []},
+    }})
+    # scrub employer contact PII on this trainee's employment records
+    await db.employment_records.update_many({"trainee_id": tid}, {"$set": {"employer_contact": None}})
+    # scrub free-text follow-up responses (may contain identifying text)
+    await db.followups.update_many({"trainee_id": tid}, {"$set": {"raw_response_text": None}})
+    await db.consent_logs.insert_one({"trainee_id": tid, "action": "revoked", "timestamp": now,
+                                      "scope": [], "anonymized": True, "performed_by": user["email"]})
+    return {"trainee_id": trainee_id, "anonymized": True,
+            "message": "Consent revoked. PII anonymized; aggregate stats preserved."}
 
 
 # ===========================================================================
@@ -460,10 +507,13 @@ async def schedule_followups(body: ScheduleBody, user: dict = Depends(require_ro
             pids = await program_ids_for_provider(ObjectId(user["provider_id"]))
             query["program_id"] = {"$in": pids}
     enrollments = await db.enrollments.find(query).to_list(100000)
+    consenting = set(await db.trainees.distinct("_id", {"consent.given": True}))
     created = 0
     for e in enrollments:
         if not e.get("certification_date"):
             continue
+        if e["trainee_id"] not in consenting:
+            continue  # skip trainees who revoked consent
         try:
             cert = datetime.fromisoformat(e["certification_date"])
         except ValueError:
@@ -496,6 +546,7 @@ async def respond_followup(followup_id: str, body: RespondBody, user: dict = Dep
     if not fu:
         raise HTTPException(status_code=404, detail="Follow-up not found")
     await assert_trainee_access(user, fu["trainee_id"])
+    await assert_consent(fu["trainee_id"])
 
     if body.unreachable:
         await db.followups.update_one({"_id": fu["_id"]}, {"$set": {
@@ -559,9 +610,12 @@ async def create_employment(body: EmploymentBody, user: dict = Depends(get_curre
     await assert_trainee_access(user, tid)
     if body.type not in {"employed", "self_employed", "apprentice", "unemployed"}:
         raise HTTPException(status_code=400, detail="Invalid employment type")
+    await assert_consent(tid, "employment_status")
+    trainee = await db.trainees.find_one({"_id": tid}, {"consent": 1})
+    wage_ok = bool(trainee and trainee.get("consent", {}).get("given") and "wage_data" in (trainee.get("consent", {}).get("scope") or []))
     doc = {"trainee_id": tid, "type": body.type, "employer_name": body.employer_name,
            "employer_contact": body.employer_contact, "sector": body.sector,
-           "wage_bracket": body.wage_bracket, "employer_verified": False,
+           "wage_bracket": body.wage_bracket if wage_ok else None, "employer_verified": False,
            "verification_timestamp": None, "reported_at": datetime.now(timezone.utc)}
     res = await db.employment_records.insert_one(doc)
     doc["_id"] = res.inserted_id
@@ -646,6 +700,7 @@ async def create_non_placement(body: NonPlacementBody, user: dict = Depends(get_
              "low_wage_offered", "further_studies", "other"}
     if body.reason_category not in valid:
         raise HTTPException(status_code=400, detail="Invalid reason category")
+    await assert_consent(tid, "employment_status")
     doc = {"trainee_id": tid, "reason_category": body.reason_category, "notes": body.notes,
            "reported_at": datetime.now(timezone.utc)}
     res = await db.non_placement_reasons.insert_one(doc)
@@ -674,8 +729,9 @@ async def compute_summary(trainee_ids: List[ObjectId]) -> dict:
     with_record = sum(breakdown.values())
     placement_rate = round(placed / with_record * 100, 1) if with_record else 0
 
+    wage_ok_ids = await db.trainees.distinct("_id", {"_id": tset, "consent.given": True, "consent.scope": "wage_data"})
     wage = await db.employment_records.aggregate([
-        {"$match": {"trainee_id": tset, "type": {"$in": list(PLACED_TYPES)}, "wage_bracket": {"$ne": None}}},
+        {"$match": {"trainee_id": {"$in": wage_ok_ids}, "type": {"$in": list(PLACED_TYPES)}, "wage_bracket": {"$ne": None}}},
         {"$group": {"_id": "$wage_bracket", "count": {"$sum": 1}}},
     ]).to_list(20)
     wage_dist = {w: 0 for w in WAGE_ORDER}
@@ -838,6 +894,8 @@ def _age_bucket(dob: Optional[str]) -> str:
 async def trainees_overview(user: dict = Depends(get_current_user), provider_id: Optional[str] = None,
                             limit: int = Query(500, le=1000)):
     allowed = await accessible_trainee_ids(user)
+    if user["role"] in ("state_admin", "super_admin") and not provider_id:
+        raise HTTPException(status_code=403, detail="Select a provider to view trainee-level data")
     q = {} if allowed is None else {"_id": {"$in": allowed}}
     if provider_id:
         pids = await program_ids_for_provider(oid(provider_id))
@@ -972,12 +1030,14 @@ async def _export_rows(trainees):
         prov = providers.get(prog["provider_id"]) if prog else None
         emp = await db.employment_records.find_one({"trainee_id": t["_id"]}, sort=[("reported_at", -1)])
         fu = await db.followups.find_one({"trainee_id": t["_id"], "status": {"$ne": "pending"}}, sort=[("scheduled_date", -1)])
+        wage_ok = bool(t.get("consent", {}).get("given") and "wage_data" in (t.get("consent", {}).get("scope") or []))
+        wage_cell = "" if not emp else ((emp.get("wage_bracket") or "") if wage_ok else "(consent off)")
         rows.append([
             t["full_name"], t.get("district") or "", t.get("gender") or "", _age_bucket(t.get("dob")),
             prov["name"] if prov else "", prog["course_name"] if prog else "", prog["sector"] if prog else "",
             "Yes" if enr and enr.get("certified") else "No",
             _PRETTY_TYPE.get(emp["type"], "Unknown") if emp else "Unknown",
-            (emp.get("wage_bracket") or "") if emp else "",
+            wage_cell,
             "Yes" if emp and emp.get("employer_verified") else "No",
             fu["confidence_score"] if fu else "unreachable",
         ])

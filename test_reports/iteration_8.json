@@ -1,0 +1,52 @@
+{
+  "summary": "Iteration 8 — re-verification of the 2 HIGH + 1 MEDIUM issues from iteration_7, plus privacy/auth regression. NEW suite /app/backend/tests/test_phase8_consent_enforcement.py (3 cases) and /app/backend/tests/test_phase8_auth_playbook.py (6 cases). Full backend suite: 118/118 PASS serially (-n 0). ALL THREE FIXES VERIFIED. (1) HIGH consent enforcement on write paths: created QA_ trainee (full scope) + certified enrollment; BEFORE revoke POST /api/employment (wage '15-25k' persisted), POST /api/non-placement-reason (200) and POST /api/followups/schedule (>0 created) + POST /api/followups/{id}/respond (200) all succeed; AFTER POST /api/trainees/{id}/revoke-consent all three write paths return 403 ('Trainee has not consented, or consent was revoked') and GET /api/trainees/{id} confirms NO new employment record ('PostRevoke Corp' absent). Separate case: a revoked trainee with a certified enrollment gets followups_created:0 both for the targeted enrollment_id and for the full schedule cycle, and GET /api/followups?trainee_id= returns []. (2) HIGH UI guard verified on the public URL as provider: on a consented trainee open-simulator-btn + revoke-consent-btn are visible and no anonymized-badge; after clicking revoke (window.confirm accepted) the toast 'Consent revoked - PII anonymized' appears, anonymized-badge renders, open-simulator-btn count = 0 and revoke-consent-btn count = 0, header shows 'Anonymized Trainee #7f85' / 'REDACTED' / 'No Consent' / 'DATA SHARED: None', and the guard persists after a full page reload. (3) MEDIUM admin drill-down verified: /admin as super_admin, clicking provider-drill-0 ('Vidarbha Training Academy') sets filter-provider-select to that provider id, fires GET /api/analytics/overview?provider_id=..., KPI stat-total changes 151 -> 35, scrollY = 0; district-row-0 still filters (district=Pune, stat-total 151 -> 42); zero console errors and zero 4xx/5xx on the admin dashboard. (4) Regression: provider UI enroll flow with 'Wage / income data' scope UNCHECKED -> POST /trainees + /enrollments 200, simulator Employed + 15-25k -> POST /employment 200 with wage dropped, profile shows wage-consent-off notice, chips only 'Employment status' + 'Contact for verification', no wage value anywhere; revoke still anonymizes name/phone in DB while provider aggregate total_trainees is unchanged; audit trail shows granted/accessed/revoked (+scope_updated via PATCH); admin trainee-level list endpoints still 403 without drill-down; CSV (headers + >10 rows) and PDF (%PDF magic) exports OK. (5) Auth playbook: all seeded password hashes start with $2b$; lockout after 5 failed attempts (12/12 lockout tests pass); CORS preflight allowed for the public origin; bearer JWT auth + access_token cookie fallback both authenticate /auth/me; unauthenticated /auth/me -> 401. DB left clean: 150 trainees, 0 QA_/Anonymized rows, 0 anonymized flags, login_attempts cleared.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "POST /api/auth/login", "issue": "No httpOnly auth cookie is set — the JWT is returned in the body and the SPA stores it in localStorage ('skilltrace_token'), which is XSS-readable. get_current_user() already supports an 'access_token' cookie fallback, so switching to a Secure/HttpOnly/SameSite cookie would be a small change. Backend CORSMiddleware is configured with allow_credentials=False and allow_origins default '*' (ingress also returns ACAO '*'), which would need tightening to an explicit origin first."},
+      {"endpoint": "GET /api/trainees/{id}", "issue": "Still writes an unthrottled 'accessed' consent_log on every read — one short UI session produced 5 'Data Accessed' rows for a single trainee (carried over from iteration_7, by design but noisy)."},
+      {"endpoint": "GET /api/trainees/{id}/consent-logs", "issue": "Items still expose the stringified Mongo `_id` (app-wide ser() convention)."},
+      {"endpoint": "POST /api/employment (revoked trainee)", "issue": "Returns 403 correctly, but the 403 detail is not surfaced to the user — the simulator shows a generic 'Could not save outcome' toast. Show the consent reason so the demo narrative is clear."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "MessagingSimulator route /simulator/:traineeId", "issue": "The route itself is still directly reachable for a consent-revoked/anonymized trainee (chat panel + quick replies render); only the backend blocks the write (403 -> generic error toast). Add a client-side guard/redirect (defense in depth + clearer UX).", "selector": "[data-testid=\"whatsapp-quick-reply-employed\"]", "priority": "LOW"}
+    ],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Enroll New Trainee modal", "issues": ["'Date of birth' uses the native browser date input rather than a styled calendar component (inconsistent with the rest of the design system).", "React hydration warning '<span> cannot be a child of <option>' still logged from the <select> options in EnrollTraineeModal (options render an instrumentation <span>); harmless but noisy in console."]},
+      {"screen": "Trainee profile - Consent Audit Trail", "issues": ["Still dominated by repeated 'Data Accessed' rows (one per page load) — group/collapse consecutive access events."]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_phase8_consent_enforcement.py",
+    "/app/backend/tests/test_phase8_auth_playbook.py",
+    "/app/backend/tests/qa_cleanup_phase8.py",
+    "/app/test_reports/pytest/phase8_all.xml"
+  ],
+  "action_items": [
+    "All 3 reported issues (consent enforcement on write paths, simulator UI guard, admin provider drill-down) are FIXED and verified — no blocking work left.",
+    "LOW: guard the /simulator/:traineeId route client-side for revoked/anonymized trainees and surface the 403 consent reason instead of the generic 'Could not save outcome' toast.",
+    "LOW: throttle/group 'accessed' consent logs; drop `_id` from consent-logs items; fix the <span>-in-<option> warning; consider a styled date picker in the enroll modal.",
+    "OPTIONAL (security hardening for the SIH narrative): move the JWT to an httpOnly Secure cookie and set explicit CORS_ORIGINS with allow_credentials=True."
+  ],
+  "critical_code_review_comments": [
+    "assert_consent() is now correctly called from create_employment ('employment_status'), create_non_placement ('employment_status') and respond_followup (given), and schedule_followups filters with db.trainees.distinct('_id', {'consent.given': True}) — enforcement is centralized and consistent.",
+    "schedule_followups() loads the full consenting-trainee id set on every call (distinct over 150 docs today); fine at demo scale but use an $in/aggregation join if trainee volume grows.",
+    "server.py is ~1306 lines — still worth splitting into routers (trainees/consent, analytics/export, ml) for maintainability.",
+    "get_trainee() writes an audit row on every read with no rate limiting — consent_logs grows with page loads."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_phase8_consent_enforcement.py (new)",
+    "/app/backend/tests/test_phase8_auth_playbook.py (new)",
+    "/app/backend/tests/qa_cleanup_phase8.py (new — also matches 'Anonymized Trainee #' rows which the old qa_cleanup.py missed)"
+  ],
+  "success_rate": {"backend": "100% (118/118, incl. 3 new consent-enforcement + 6 auth/export playbook cases)", "frontend": "100% of tested flows (UI guard, admin provider + district drill-down, consent-scope enroll->simulator->profile flow, exports)"},
+  "seed_data_creation": "Created and deleted QA trainees: 'QA_UIGuard Trainee' (revoked via UI, became 'Anonymized Trainee #7f85'), 'QA_UIScope1788396693' (wage consent off), plus pytest QA_Enforce/QA_EnforceSchedule/QA_EnforceAgg and the phase6/7 QA trainees. Verified DB back to 150 trainees, 0 QA_/Anonymized rows, 0 anonymized flags, login_attempts cleared. No seed trainee was anonymized.",
+  "should_call_test_agent_after_fix": false,
+  "should_main_agent_self_test": true,
+  "test_credentials": "admin@skilltrace.gov.in / Admin@123, provider@skilltrace.gov.in / Provider@123, district@skilltrace.gov.in / District@123, state@skilltrace.gov.in / State@123 (from /app/memory/test_credentials.md)",
+  "context_for_next_testing_agent": "Correct login testids: login-email-input / login-password-input / login-submit-button (NOT ...-btn). Provider dashboard enroll button is enroll-trainee-button; modal fields are enroll-name / enroll-phone / enroll-dob / enroll-gender / enroll-district / enroll-program / enroll-attendance / enroll-score / enroll-certified, scope checkboxes consent-scope-{employment_status|wage_data|contact_for_verification}, main consent-checkbox is UNCHECKED by default and gates enroll-submit-btn. The enroll-program <select> is populated asynchronously — wait_for_function on option count > 1 before select_option. POST /api/enrollments needs certification_date (not just certified:true) for /followups/schedule to create rows. window.confirm is used for revoke — register page.on('dialog', accept) first. Use `python /app/backend/tests/qa_cleanup_phase8.py` for cleanup (handles anonymized names). pytest.ini forces -n 2; use -n 0 for exact-count assertions.",
+  "rca_of_the_issue": "Iteration_7 RCA confirmed fixed: the central assert_consent(trainee_id, scope) helper (server.py ~line 144) raises 403 when consent.given is false or the required scope is missing, and is now invoked from create_employment, create_non_placement and respond_followup, while schedule_followups skips trainees outside the consenting set. On the UI, open-simulator-btn and revoke-consent-btn are wrapped in {consent.given && !trainee.anonymized}, and AdminDashboard provider-drill-N rows now call setFilter('provider_id', ...) + window.scrollTo(top), which re-issues /api/analytics/overview?provider_id=."
+}

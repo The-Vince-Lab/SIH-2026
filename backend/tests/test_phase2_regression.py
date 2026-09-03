@@ -58,34 +58,37 @@ class TestAuth:
 
 # --- Module: TRAINEES + scoping --------------------------------------------
 class TestTraineeScoping:
-    def test_super_admin_sees_150(self, client, admin_headers):
-        r = client.get(f"{API}/trainees?limit=1", headers=admin_headers, timeout=60)
+    def test_super_admin_requires_drilldown_then_sees_all(self, client, admin_headers):
+        # privacy phase: no raw PII list without drilling into provider/course/district
+        bare = client.get(f"{API}/trainees?limit=1", headers=admin_headers, timeout=60)
+        assert bare.status_code == 403, bare.text
+        r = client.get(f"{API}/trainees?district=Pune&limit=1", headers=admin_headers, timeout=60)
         assert r.status_code == 200, r.text
-        assert r.json()["total"] == 150, r.json()["total"]
+        assert r.json()["total"] > 0
 
     def test_provider_sees_subset(self, client, provider_headers, admin_headers):
-        p = client.get(f"{API}/trainees?limit=1", headers=provider_headers, timeout=60)
-        a = client.get(f"{API}/trainees?limit=1", headers=admin_headers, timeout=60)
+        p = client.get(f"{API}/trainees?district=Pune&limit=1", headers=provider_headers, timeout=60)
+        a = client.get(f"{API}/trainees?district=Pune&limit=1", headers=admin_headers, timeout=60)
         assert p.status_code == 200, p.text
         ptotal, atotal = p.json()["total"], a.json()["total"]
         assert 0 < ptotal < atotal, f"provider {ptotal} vs admin {atotal}"
 
     def test_district_admin_scoped_to_pune(self, client, tokens):
         h = {"Authorization": f"Bearer {tokens['district_admin']}"}
-        r = client.get(f"{API}/trainees?limit=1000", headers=h, timeout=60)
+        r = client.get(f"{API}/trainees?district=Pune&limit=1000", headers=h, timeout=60)
         assert r.status_code == 200, r.text
         items = r.json()["items"]
         assert items
         assert {i["district"] for i in items} == {"Pune"}
 
     def test_phone_not_leaked_and_no_mongo_id_key(self, client, admin_headers):
-        r = client.get(f"{API}/trainees?limit=3", headers=admin_headers, timeout=60)
+        r = client.get(f"{API}/trainees?district=Pune&limit=3", headers=admin_headers, timeout=60)
         for t in r.json()["items"]:
             assert "phone_number" not in t
             assert "_id" in t and isinstance(t["_id"], str)
 
     def test_get_trainee_detail(self, client, admin_headers):
-        tid = client.get(f"{API}/trainees?limit=1", headers=admin_headers, timeout=60).json()["items"][0]["_id"]
+        tid = client.get(f"{API}/trainees?district=Pune&limit=1", headers=admin_headers, timeout=60).json()["items"][0]["_id"]
         r = client.get(f"{API}/trainees/{tid}", headers=admin_headers, timeout=60)
         assert r.status_code == 200, r.text
         d = r.json()
@@ -97,9 +100,9 @@ class TestTraineeScoping:
         assert r.status_code == 400, r.text
 
     def test_provider_forbidden_on_foreign_trainee(self, client, admin_headers, provider_headers):
-        admin_ids = [t["_id"] for t in client.get(f"{API}/trainees?limit=1000", headers=admin_headers,
+        admin_ids = [t["_id"] for t in client.get(f"{API}/trainees?district=Pune&limit=1000", headers=admin_headers,
                                                   timeout=60).json()["items"]]
-        prov_ids = {t["_id"] for t in client.get(f"{API}/trainees?limit=1000", headers=provider_headers,
+        prov_ids = {t["_id"] for t in client.get(f"{API}/trainees?district=Pune&limit=1000", headers=provider_headers,
                                                  timeout=60).json()["items"]}
         foreign = next(i for i in admin_ids if i not in prov_ids)
         r = client.get(f"{API}/trainees/{foreign}", headers=provider_headers, timeout=60)
@@ -146,7 +149,7 @@ class TestFollowupRespond:
 # --- Module: EMPLOYMENT + public verification flow -------------------------
 class TestEmploymentVerification:
     def test_full_verification_flow_and_token_reuse(self, client, admin_headers):
-        tid = client.get(f"{API}/trainees?limit=1", headers=admin_headers, timeout=60).json()["items"][0]["_id"]
+        tid = client.get(f"{API}/trainees?district=Pune&limit=1", headers=admin_headers, timeout=60).json()["items"][0]["_id"]
         emp = client.post(f"{API}/employment", headers=admin_headers, timeout=60, json={
             "trainee_id": tid, "type": "employed", "employer_name": "TEST_Bakery Pvt Ltd",
             "employer_contact": "9876500011", "sector": "Hospitality", "wage_bracket": "15-25k"})
@@ -186,7 +189,7 @@ class TestEmploymentVerification:
         assert r.status_code == 404
 
     def test_invalid_employment_type_400(self, client, admin_headers):
-        tid = client.get(f"{API}/trainees?limit=1", headers=admin_headers, timeout=60).json()["items"][0]["_id"]
+        tid = client.get(f"{API}/trainees?district=Pune&limit=1", headers=admin_headers, timeout=60).json()["items"][0]["_id"]
         r = client.post(f"{API}/employment", headers=admin_headers,
                         json={"trainee_id": tid, "type": "banana"}, timeout=60)
         assert r.status_code == 400

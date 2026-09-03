@@ -18,7 +18,8 @@ const ORDER = ["1_month", "3_month", "6_month", "12_month"];
 const CONSENT_ACTION = {
   granted: { label: "Consent Granted", dot: "bg-emerald-500", Icon: ShieldCheck },
   scope_updated: { label: "Scope Updated", dot: "bg-amber-500", Icon: PencilLine },
-  revoked: { label: "Consent Revoked", dot: "bg-rose-500", Icon: ShieldOff },
+  revoked: { label: "Consent Revoked & Anonymized", dot: "bg-rose-500", Icon: ShieldOff },
+  accessed: { label: "Data Accessed", dot: "bg-slate-400", Icon: History },
 };
 const fmtInterval = (l) => ({ "1_month": "1 mo", "3_month": "3 mo", "6_month": "6 mo", "12_month": "12 mo" }[l] || l);
 const fmtDate = (ts) => { try { return new Date(ts).toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" }); } catch { return ts; } };
@@ -33,6 +34,7 @@ export default function TraineeProfile() {
   const [riskState, setRiskState] = useState("loading");
   const [consentLogs, setConsentLogs] = useState([]);
   const [wagePoints, setWagePoints] = useState([]);
+  const [wageConsent, setWageConsent] = useState(true);
   const [loading, setLoading] = useState(true);
 
   const load = useCallback(async () => {
@@ -53,6 +55,7 @@ export default function TraineeProfile() {
       setPrograms(Object.fromEntries(pr.data.map((p) => [p._id, p])));
       setConsentLogs(cl.data.items || []);
       setWagePoints(wp.data.points || []);
+      setWageConsent(wp.data.wage_consent !== false);
       setRiskState("loading");
       api.get(`/analytics/trainee/${id}/risk`)
         .then((r) => { setRisk(r.data.risk); setRiskState("ok"); })
@@ -61,6 +64,17 @@ export default function TraineeProfile() {
   }, [id]);
 
   useEffect(() => { load(); }, [load]);
+
+  const revokeAndAnonymize = async () => {
+    if (!window.confirm("Revoke consent and permanently anonymize this trainee's name & phone? Aggregate stats are preserved. This cannot be undone.")) return;
+    try {
+      await api.post(`/trainees/${id}/revoke-consent`);
+      toast.success("Consent revoked · PII anonymized");
+      load();
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Could not revoke consent");
+    }
+  };
 
   if (loading || !d) return (
     <div className="min-h-screen bg-background"><Navbar />
@@ -108,14 +122,35 @@ export default function TraineeProfile() {
             </div>
           </div>
           <div className="flex items-center gap-2">
+            {trainee.anonymized && (
+              <span className="inline-flex items-center gap-1.5 text-xs font-semibold px-2.5 py-1 rounded-full bg-slate-100 border border-slate-300 text-slate-600" data-testid="anonymized-badge"><ShieldOff className="h-3.5 w-3.5" /> Anonymized</span>
+            )}
             {consent.given
               ? <span className="inline-flex items-center gap-1.5 text-xs font-semibold px-2.5 py-1 rounded-full bg-emerald-50 border border-emerald-200 text-emerald-700"><ShieldCheck className="h-3.5 w-3.5" /> Consent Active</span>
               : <span className="inline-flex items-center gap-1.5 text-xs font-semibold px-2.5 py-1 rounded-full bg-rose-50 border border-rose-200 text-rose-700"><ShieldOff className="h-3.5 w-3.5" /> No Consent</span>}
-            <button data-testid="open-simulator-btn" onClick={() => navigate(`/simulator/${id}`)}
-              className="inline-flex items-center gap-1.5 text-sm font-semibold rounded-lg bg-brand hover:bg-brand-hover text-white px-3 py-2">
-              <MessageSquare className="h-4 w-4" /> Simulator
-            </button>
+            {consent.given && !trainee.anonymized && (
+              <button data-testid="open-simulator-btn" onClick={() => navigate(`/simulator/${id}`)}
+                className="inline-flex items-center gap-1.5 text-sm font-semibold rounded-lg bg-brand hover:bg-brand-hover text-white px-3 py-2">
+                <MessageSquare className="h-4 w-4" /> Simulator
+              </button>
+            )}
+            {consent.given && !trainee.anonymized && (
+              <button data-testid="revoke-consent-btn" onClick={revokeAndAnonymize}
+                className="inline-flex items-center gap-1.5 text-sm font-semibold rounded-lg border border-rose-300 text-rose-600 hover:bg-rose-50 px-3 py-2">
+                <ShieldOff className="h-4 w-4" /> Revoke & Anonymize
+              </button>
+            )}
           </div>
+        </div>
+
+        {/* Active consent scopes */}
+        <div className="mt-3 flex flex-wrap items-center gap-2" data-testid="consent-scopes">
+          <span className="text-xs text-slate-400 uppercase tracking-wider font-medium">Data shared:</span>
+          {consent.given && (consent.scope || []).length ? (consent.scope || []).map((s) => (
+            <span key={s} className="text-xs font-medium px-2 py-0.5 rounded-full bg-brand/10 text-brand border border-brand/20">
+              {({ employment_status: "Employment status", wage_data: "Wage data", contact_for_verification: "Contact for verification" }[s]) || s}
+            </span>
+          )) : <span className="text-xs text-slate-400">None — no data may be collected for this trainee</span>}
         </div>
 
         <div className="grid lg:grid-cols-3 gap-6 mt-6">
@@ -198,7 +233,11 @@ export default function TraineeProfile() {
           <div className="bg-white rounded-xl border border-slate-200/90 shadow-sm p-6" data-testid="wage-progression">
             <div className="flex items-center gap-2 font-heading font-semibold text-slate-800"><TrendingUp className="h-4 w-4 text-indiagreen" /> Wage Progression</div>
             <p className="text-xs text-slate-400 mt-0.5 mb-3">Self-reported monthly income (₹ '000s) across follow-up check-ins.</p>
-            {wagePoints.length < 2 ? (
+            {!wageConsent ? (
+              <div className="h-[220px] grid place-items-center text-center text-sm text-slate-400 px-6" data-testid="wage-consent-off">
+                <span><ShieldOff className="h-5 w-5 mx-auto mb-2 text-slate-300" />Wage-sharing consent is off — no income data is collected or shown for this trainee.</span>
+              </div>
+            ) : wagePoints.length < 2 ? (
               <div className="h-[220px] grid place-items-center text-sm text-slate-400">Not enough follow-up wage data to plot a trend.</div>
             ) : (
               <ResponsiveContainer width="100%" height={240}>

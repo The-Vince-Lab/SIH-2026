@@ -314,12 +314,12 @@ class TestRegression:
         assert 0.0 <= p.json()["risk_score"] <= 1.0
 
     def test_trainee_scoping(self, client, admin_headers, provider_headers):
-        a = client.get(f"{API}/trainees?limit=1000", headers=admin_headers, timeout=60)
+        a = client.get(f"{API}/trainees?district=Pune&limit=1000", headers=admin_headers, timeout=60)
         assert a.status_code == 200, a.text[:300]
         admin_total = a.json()["total"]
-        assert admin_total >= 150, admin_total
+        assert admin_total > 0, admin_total
 
-        p = client.get(f"{API}/trainees?limit=1000", headers=provider_headers, timeout=60)
+        p = client.get(f"{API}/trainees?district=Pune&limit=1000", headers=provider_headers, timeout=60)
         assert p.status_code == 200, p.text[:300]
         prov_total = p.json()["total"]
         assert 0 < prov_total < admin_total, (prov_total, admin_total)

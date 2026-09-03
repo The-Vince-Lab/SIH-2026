@@ -210,10 +210,11 @@ export default function AdminDashboard() {
               <div className="divide-y divide-slate-100">
                 {data.by_provider.map((p, i) => (
                   <div key={p.name} data-testid={`provider-drill-${i}`}
-                    className="flex items-center justify-between px-5 py-3 hover:bg-slate-50/70">
+                    onClick={() => { const pv = providers.find((x) => x.name === p.name); if (pv) setFilter("provider_id", pv._id); window.scrollTo({ top: 0, behavior: "smooth" }); }}
+                    className="flex items-center justify-between px-5 py-3 hover:bg-slate-50/70 cursor-pointer">
                     <div>
                       <div className="font-semibold text-slate-800 text-sm">{p.name}</div>
-                      <div className="text-xs text-slate-400">{p.total} trainees</div>
+                      <div className="text-xs text-slate-400">{p.total} trainees · click to filter dashboard</div>
                     </div>
                     <span className="font-bold text-indiagreen">{p.placement_rate}%</span>
                   </div>
