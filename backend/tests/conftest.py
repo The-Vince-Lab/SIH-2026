@@ -6,6 +6,11 @@ import requests
 from dotenv import dotenv_values
 
 frontend_env = dotenv_values("/app/frontend/.env")
+# Make backend env (DB_NAME, MONGO_URL) available to tests that inspect the DB directly.
+_backend_env = dotenv_values("/app/backend/.env")
+for _k in ("DB_NAME", "MONGO_URL"):
+    if _k not in os.environ and _backend_env.get(_k):
+        os.environ[_k] = _backend_env[_k]
 _base = os.environ.get("REACT_APP_BACKEND_URL") or frontend_env.get("REACT_APP_BACKEND_URL")
 if not _base:
     raise RuntimeError("REACT_APP_BACKEND_URL missing from env and /app/frontend/.env")

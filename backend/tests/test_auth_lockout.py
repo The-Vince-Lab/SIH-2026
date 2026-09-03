@@ -1,4 +1,5 @@
 """FIX VERIFICATION: brute-force lockout on POST /api/auth/login (per-email, 429 not 500)."""
+import os
 import uuid
 
 import pytest
@@ -66,12 +67,12 @@ class TestLockoutRealAccountValidPassword:
         """Clearing login_attempts (simulating TTL expiry) restores login."""
         import subprocess
         subprocess.run(
-            ["mongosh", "test_database", "--quiet", "--eval",
+            ["mongosh", os.environ["DB_NAME"], "--quiet", "--eval",
              f'db.login_attempts.deleteMany({{identifier: "{self.email}"}})'],
             check=False, capture_output=True)
         r = _post_login(client, self.email, self.password)
         assert r.status_code == 200, f"login still blocked after clearing attempts: {r.status_code} {r.text[:300]}"
-        subprocess.run(["mongosh", "test_database", "--quiet", "--eval",
+        subprocess.run(["mongosh", os.environ["DB_NAME"], "--quiet", "--eval",
                         f'db.users.deleteMany({{email: "{self.email}"}})'],
                        check=False, capture_output=True)
 
@@ -91,7 +92,7 @@ class TestSeededAccountsStillWork:
 class TestLockoutInfra:
     def test_login_attempts_indexes(self):
         import subprocess
-        out = subprocess.run(["mongosh", "test_database", "--quiet", "--eval",
+        out = subprocess.run(["mongosh", os.environ["DB_NAME"], "--quiet", "--eval",
                               "JSON.stringify(db.login_attempts.getIndexes())"],
                              capture_output=True, text=True).stdout
         print(out)
@@ -100,7 +101,7 @@ class TestLockoutInfra:
 
     def test_bcrypt_hash_format(self):
         import subprocess
-        out = subprocess.run(["mongosh", "test_database", "--quiet", "--eval",
+        out = subprocess.run(["mongosh", os.environ["DB_NAME"], "--quiet", "--eval",
                               'db.users.findOne({email:"admin@skilltrace.gov.in"}).password_hash'],
                              capture_output=True, text=True).stdout.strip()
         assert out.startswith("$2b$"), f"unexpected hash format: {out[:20]}"

@@ -44,5 +44,19 @@ non-placement reasons · role-based analytics · explainable AI · confidence sc
 - P2: CSV/PDF report export; wage-progression-over-time chart; Hindi/Hinglish classifier expansion; /auth/me boot revalidation.
 - P2: split server.py into routers; batch queries in at-risk/overview for scale.
 
+## Phase 6 (SIH build-prompt "Consent, Privacy & Access Control") — VERIFIED COMPLETE (2026-09)
+Mapped to the official build prompt. All 4 requirements implemented + full health check passed:
+  1. Consent scope toggles (wage_data etc.) stored on trainee.consent.scope and ENFORCED (wage
+     dropped on employment create, hidden from analytics/wage-progression/CSV -> "(consent off)").
+  2. POST /api/trainees/{id}/revoke-consent -> real DB anonymization of name/phone, consent.given=false,
+     aggregate counts preserved. Guard persists across reload; write paths 403 after revoke.
+  3. Admin analytics return aggregates only; /api/trainees & /api/trainees-overview 403 unless
+     provider drill-down; providers see only their own trainees.
+  4. consent_logs audit (granted/scope_updated/accessed/revoked/anonymized) + audit-trail viewer in
+     TraineeProfile. Documented in /docs/privacy_design.md.
+Health check: backend 118/118 pytest + independent testing agent 38 tests (7/7 areas);
+frontend testing agent 5/5 sections. Container reset repaired: restored backend/.env + frontend/.env,
+reseeded 150 trainees. Fixed 3 stale auth-lockout tests (hardcoded DB name -> env DB_NAME).
+
 ## Next tasks
-Awaiting user's Phase 6 instructions (consent audit trail / advanced governance per original spec).
+Awaiting user's Phase 7 (Demo Data Story & Final Polish) instructions.
