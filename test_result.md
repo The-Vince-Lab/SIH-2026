@@ -101,3 +101,54 @@
 #====================================================================================================
 # Testing Data - Main Agent and testing sub agent both should log testing data below this section
 #====================================================================================================
+## user_problem_statement: "Continuation of SkillTrace AI (SIH 2026). User reported: Login fails. Fix and verify."
+
+## backend:
+##   - task: "Auth login API (/api/auth/login)"
+##     implemented: true
+##     working: true
+##     file: "backend/server.py, backend/auth.py"
+##     stuck_count: 0
+##     priority: "high"
+##     needs_retesting: false
+##     status_history:
+##         -working: true
+##         -agent: "main"
+##         -comment: "Root cause of container reset: backend/.env and frontend/.env were empty and MongoDB wiped. Restored .env (MONGO_URL, DB_NAME=skilltrace, JWT_SECRET, PHONE_ENCRYPTION_KEY, CORS_ORIGINS, ADMIN_EMAIL/PASSWORD) and reseeded 150 trainees. Direct + external curl to /api/auth/login return 200 with token for all seeded roles."
+
+## frontend:
+##   - task: "Login flow (Login.jsx + AuthContext + api.js)"
+##     implemented: true
+##     working: true
+##     file: "frontend/src/pages/Login.jsx, frontend/src/context/AuthContext.js, frontend/src/lib/api.js"
+##     stuck_count: 0
+##     priority: "high"
+##     needs_retesting: false
+##     status_history:
+##         -working: false
+##         -agent: "user"
+##         -comment: "User reported login fails."
+##         -working: true
+##         -agent: "main"
+##         -comment: "Root cause: frontend dev server had started BEFORE frontend/.env was restored, so REACT_APP_BACKEND_URL was undefined in the running bundle and all API calls went to undefined/api/*. Restored frontend/.env and restarted frontend. Manual browser check: filling admin@skilltrace.gov.in/Admin@123 and clicking Sign In now redirects off /login to / with zero console errors. Needs testing-agent verification."
+##         -working: true
+##         -agent: "testing"
+##         -comment: "COMPREHENSIVE LOGIN TESTING COMPLETE - ALL SCENARIOS PASSED: (1) Manual login with admin@skilltrace.gov.in/Admin@123 successfully redirects to /admin with token and user stored in localStorage. (2) Invalid credentials (admin@skilltrace.gov.in/WrongPass) correctly stays on /login and displays error message 'Invalid email or password'. (3) All 4 one-click demo login buttons work: Super Admin→/admin, State Admin→/admin, District Officer→/admin, Training Provider→/provider (correct role-based routing). (4) CRITICAL: Zero 'undefined/api' calls detected - the main issue is fully resolved. (5) localStorage correctly stores 'skilltrace_token' (JWT, 291 chars) and 'skilltrace_user' (JSON with email and role). (6) Only expected 401 error from invalid credentials test. Login functionality is fully operational."
+
+## metadata:
+##   created_by: "main_agent"
+##   version: "1.2"
+##   test_sequence: 2
+##   run_ui: true
+
+## test_plan:
+##   current_focus: []
+##   stuck_tasks: []
+##   test_all: false
+##   test_priority: "high_first"
+
+## agent_communication:
+##     -agent: "main"
+##     -message: "Please verify LOGIN ONLY. The app is SkillTrace AI. Test all 4 roles via the one-click demo login buttons AND manual email/password entry. Credentials in /app/memory/test_credentials.md: admin@skilltrace.gov.in/Admin@123 (super_admin -> should land on admin dashboard), provider@skilltrace.gov.in/Provider@123 (provider -> provider dashboard), district@skilltrace.gov.in/District@123, state@skilltrace.gov.in/State@123. Verify: (1) successful login redirects away from /login to the correct role dashboard, (2) token stored in localStorage, (3) invalid credentials show an error message and stay on /login, (4) no console errors / no calls to 'undefined/api'. Do NOT test other features yet."
+##     -agent: "testing"
+##     -message: "LOGIN VERIFICATION COMPLETE ✅ - All test scenarios passed successfully. Tested: (1) Manual login with correct credentials → redirects to /admin ✓, (2) Invalid credentials → stays on /login with error message ✓, (3) All 4 one-click demo buttons (Super Admin, State Admin, District Officer, Training Provider) → correct role-based routing ✓, (4) localStorage token/user storage ✓, (5) Zero 'undefined/api' calls ✓. The fix (restoring frontend/.env with REACT_APP_BACKEND_URL) fully resolved the issue. Login is production-ready. Ready for user acceptance or next feature testing."
