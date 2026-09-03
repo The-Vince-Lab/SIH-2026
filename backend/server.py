@@ -6,6 +6,8 @@ Roles: provider | district_admin | state_admin | super_admin
 import os
 import logging
 import secrets
+import asyncio
+from collections import defaultdict
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Optional, List
@@ -113,6 +115,33 @@ async def trainee_ids_for_programs(program_ids: List[ObjectId]) -> List[ObjectId
         return []
     ids = await db.enrollments.distinct("trainee_id", {"program_id": {"$in": program_ids}})
     return ids
+
+
+async def _best_enrollment_map(tids: List[ObjectId]) -> dict:
+    """One aggregation: best enrollment per trainee (certified first, then most recent)."""
+    if not tids:
+        return {}
+    docs = await db.enrollments.aggregate([
+        {"$match": {"trainee_id": {"$in": tids}}},
+        {"$sort": {"certified": -1, "certification_date": -1}},
+        {"$group": {"_id": "$trainee_id", "doc": {"$first": "$$ROOT"}}},
+    ]).to_list(100000)
+    return {d["_id"]: d["doc"] for d in docs}
+
+
+async def _latest_followup_map(tids: List[ObjectId], non_pending: bool) -> dict:
+    """One aggregation: latest followup per trainee (optionally excluding 'pending')."""
+    if not tids:
+        return {}
+    match: dict = {"trainee_id": {"$in": tids}}
+    if non_pending:
+        match["status"] = {"$ne": "pending"}
+    docs = await db.followups.aggregate([
+        {"$match": match},
+        {"$sort": {"scheduled_date": -1}},
+        {"$group": {"_id": "$trainee_id", "doc": {"$first": "$$ROOT"}}},
+    ]).to_list(100000)
+    return {d["_id"]: d["doc"] for d in docs}
 
 
 async def accessible_trainee_ids(user: dict) -> Optional[List[ObjectId]]:
@@ -718,36 +747,40 @@ async def compute_summary(trainee_ids: List[ObjectId]) -> dict:
                 "confidence_breakdown": {}, "reachable_rate": 0}
     tset = {"$in": trainee_ids}
     total = len(trainee_ids)
-    certified = await db.enrollments.count_documents({"trainee_id": tset, "certified": True})
 
-    emp = await db.employment_records.aggregate([
-        {"$match": {"trainee_id": tset}},
-        {"$group": {"_id": "$type", "count": {"$sum": 1}}},
-    ]).to_list(20)
+    # wage aggregation needs the consented-id set first; everything else is independent.
+    wage_ok_ids = await db.trainees.distinct("_id", {"_id": tset, "consent.given": True, "consent.scope": "wage_data"})
+
+    # Run the remaining independent reads concurrently (one round-trip's latency, not 7).
+    (certified, emp, wage, verified, conf, unreachable, total_fu) = await asyncio.gather(
+        db.enrollments.count_documents({"trainee_id": tset, "certified": True}),
+        db.employment_records.aggregate([
+            {"$match": {"trainee_id": tset}},
+            {"$group": {"_id": "$type", "count": {"$sum": 1}}},
+        ]).to_list(20),
+        db.employment_records.aggregate([
+            {"$match": {"trainee_id": {"$in": wage_ok_ids}, "type": {"$in": list(PLACED_TYPES)}, "wage_bracket": {"$ne": None}}},
+            {"$group": {"_id": "$wage_bracket", "count": {"$sum": 1}}},
+        ]).to_list(20),
+        db.employment_records.count_documents({"trainee_id": tset, "employer_verified": True}),
+        db.followups.aggregate([
+            {"$match": {"trainee_id": tset}},
+            {"$group": {"_id": "$confidence_score", "count": {"$sum": 1}}},
+        ]).to_list(20),
+        db.followups.count_documents({"trainee_id": tset, "status": {"$in": ["unreachable", "escalated_to_field_agent"]}}),
+        db.followups.count_documents({"trainee_id": tset}),
+    )
+
     breakdown = {e["_id"]: e["count"] for e in emp}
     placed = sum(v for k, v in breakdown.items() if k in PLACED_TYPES)
     with_record = sum(breakdown.values())
     placement_rate = round(placed / with_record * 100, 1) if with_record else 0
 
-    wage_ok_ids = await db.trainees.distinct("_id", {"_id": tset, "consent.given": True, "consent.scope": "wage_data"})
-    wage = await db.employment_records.aggregate([
-        {"$match": {"trainee_id": {"$in": wage_ok_ids}, "type": {"$in": list(PLACED_TYPES)}, "wage_bracket": {"$ne": None}}},
-        {"$group": {"_id": "$wage_bracket", "count": {"$sum": 1}}},
-    ]).to_list(20)
     wage_dist = {w: 0 for w in WAGE_ORDER}
     for w in wage:
         wage_dist[w["_id"]] = w["count"]
 
-    verified = await db.employment_records.count_documents({"trainee_id": tset, "employer_verified": True})
-
-    conf = await db.followups.aggregate([
-        {"$match": {"trainee_id": tset}},
-        {"$group": {"_id": "$confidence_score", "count": {"$sum": 1}}},
-    ]).to_list(20)
     conf_breakdown = {c["_id"]: c["count"] for c in conf}
-
-    unreachable = await db.followups.count_documents({"trainee_id": tset, "status": {"$in": ["unreachable", "escalated_to_field_agent"]}})
-    total_fu = await db.followups.count_documents({"trainee_id": tset})
     reachable_rate = round((total_fu - unreachable) / total_fu * 100, 1) if total_fu else 0
 
     return {"total_trainees": total, "certified": certified, "placement_rate": placement_rate,
@@ -773,16 +806,34 @@ async def provider_summary(provider_id: str, user: dict = Depends(get_current_us
         raise HTTPException(status_code=403, detail="Outside your district")
     pids = await program_ids_for_provider(oid(provider_id))
     tids = await trainee_ids_for_programs(pids)
-    summary = await compute_summary(tids)
-    # per-course mini summary
+    # Run the summary aggregation and the per-course source reads concurrently.
+    summary, progs_list, enrs, emp = await asyncio.gather(
+        compute_summary(tids),
+        db.training_programs.find({"_id": {"$in": pids}}).to_list(1000),
+        db.enrollments.find({"program_id": {"$in": pids}}, {"trainee_id": 1, "program_id": 1}).to_list(100000),
+        db.employment_records.find({"trainee_id": {"$in": tids}}, {"trainee_id": 1, "type": 1}).to_list(100000),
+    )
+    progs = {p["_id"]: p for p in progs_list}
+    prog_trainees = defaultdict(set)
+    t_progs = defaultdict(set)
+    for e in enrs:
+        prog_trainees[e["program_id"]].add(e["trainee_id"])
+        t_progs[e["trainee_id"]].add(e["program_id"])
+    prog_stats = defaultdict(lambda: {"placed": 0, "total": 0})
+    for r in emp:
+        placed = 1 if r.get("type") in PLACED_TYPES else 0
+        for pg in t_progs.get(r["trainee_id"], ()):
+            s = prog_stats[pg]; s["total"] += 1; s["placed"] += placed
     courses = []
     for pid in pids:
-        prog = await db.training_programs.find_one({"_id": pid})
-        ctids = await trainee_ids_for_programs([pid])
-        cs = await compute_summary(ctids)
+        prog = progs.get(pid)
+        if not prog:
+            continue
+        s = prog_stats.get(pid, {"placed": 0, "total": 0})
+        rate = round(s["placed"] / s["total"] * 100, 1) if s["total"] else 0
         courses.append({"program_id": str(pid), "course_name": prog["course_name"],
-                        "sector": prog["sector"], "placement_rate": cs["placement_rate"],
-                        "total_trainees": cs["total_trainees"]})
+                        "sector": prog["sector"], "placement_rate": rate,
+                        "total_trainees": len(prog_trainees.get(pid, set()))})
     return {"provider": ser(provider), "summary": summary, "courses": courses}
 
 
@@ -902,22 +953,31 @@ async def trainees_overview(user: dict = Depends(get_current_user), provider_id:
         tids = await trainee_ids_for_programs(pids)
         q["_id"] = {"$in": _intersect(q.get("_id"), tids)}
     trainees = await db.trainees.find(q, {"phone_number": 0}).limit(limit).to_list(limit)
+    tids = [t["_id"] for t in trainees]
+
+    # --- Batched lookups (avoid N+1 round-trips; critical against remote Atlas) ---
+    enr_by_t = await _best_enrollment_map(tids)
+    prog_ids = list({e["program_id"] for e in enr_by_t.values() if e.get("program_id")})
+    prog_by_id = {}
+    if prog_ids:
+        prog_by_id = {p["_id"]: p for p in
+                      await db.training_programs.find({"_id": {"$in": prog_ids}}).to_list(100000)}
+    fu_np = await _latest_followup_map(tids, non_pending=True)
+    fu_any = await _latest_followup_map(tids, non_pending=False)
+
     rows = []
     for t in trainees:
-        enr = await db.enrollments.find_one({"trainee_id": t["_id"]}, sort=[("certified", -1), ("certification_date", -1)])
+        enr = enr_by_t.get(t["_id"])
         course = sector = att = score = None
         certified = False
         if enr:
-            prog = await db.training_programs.find_one({"_id": enr["program_id"]})
+            prog = prog_by_id.get(enr["program_id"])
             course = prog["course_name"] if prog else None
             sector = prog["sector"] if prog else None
             att = enr.get("attendance_percent")
             score = enr.get("assessment_score")
             certified = enr.get("certified", False)
-        fu = await db.followups.find_one({"trainee_id": t["_id"], "status": {"$ne": "pending"}},
-                                         sort=[("scheduled_date", -1)])
-        if not fu:
-            fu = await db.followups.find_one({"trainee_id": t["_id"]}, sort=[("scheduled_date", -1)])
+        fu = fu_np.get(t["_id"]) or fu_any.get(t["_id"])
         rows.append({
             "trainee_id": str(t["_id"]), "full_name": t["full_name"], "district": t.get("district"),
             "gender": t.get("gender"), "consent_given": t.get("consent", {}).get("given", False),
@@ -956,27 +1016,72 @@ async def analytics_overview(user: dict = Depends(get_current_user), district: O
     tset = set(tids)
     totals = await compute_summary(tids)
 
+    # --- Batched group stats: build membership in memory, then 1 employment scan ---
+    enr_docs = await db.enrollments.find({"trainee_id": {"$in": tids}},
+                                         {"trainee_id": 1, "program_id": 1}).to_list(100000)
+    all_progs = await db.training_programs.find({}, {"_id": 1, "provider_id": 1, "sector": 1}).to_list(1000)
+    prog_meta = {p["_id"]: p for p in all_progs}
+    t_providers = defaultdict(set)
+    t_sectors = defaultdict(set)
+    for e in enr_docs:
+        pm = prog_meta.get(e["program_id"])
+        if not pm:
+            continue
+        t_providers[e["trainee_id"]].add(pm["provider_id"])
+        if pm.get("sector"):
+            t_sectors[e["trainee_id"]].add(pm["sector"])
+
+    emp_recs = await db.employment_records.find({"trainee_id": {"$in": tids}},
+                                                {"trainee_id": 1, "type": 1}).to_list(100000)
+
+    def _mk():
+        return {"placed": 0, "total": 0}
+    prov_stats = defaultdict(_mk)
+    sector_stats = defaultdict(_mk)
+    district_stats = defaultdict(_mk)
+    for r in emp_recs:
+        rt = r["trainee_id"]
+        placed = 1 if r.get("type") in PLACED_TYPES else 0
+        for pv in t_providers.get(rt, ()):
+            s = prov_stats[pv]; s["total"] += 1; s["placed"] += placed
+        for sc in t_sectors.get(rt, ()):
+            s = sector_stats[sc]; s["total"] += 1; s["placed"] += placed
+
+    prov_totals = defaultdict(int)
+    sector_totals = defaultdict(int)
+    district_totals = defaultdict(int)
+    trainee_district = {}
+    for t in trainees:
+        for pv in t_providers.get(t["_id"], ()):
+            prov_totals[pv] += 1
+        for sc in t_sectors.get(t["_id"], ()):
+            sector_totals[sc] += 1
+        d = t.get("district")
+        trainee_district[t["_id"]] = d
+        if d is not None:
+            district_totals[d] += 1
+    for r in emp_recs:
+        d = trainee_district.get(r["trainee_id"])
+        if d is not None:
+            s = district_stats[d]; s["total"] += 1
+            s["placed"] += 1 if r.get("type") in PLACED_TYPES else 0
+
+    def _rate(s):
+        return round(s["placed"] / s["total"] * 100, 1) if s["total"] else 0
+
     prov_q = {"district": district} if district else {}
     providers = await db.training_providers.find(prov_q).to_list(100)
     by_provider = []
     for p in providers:
-        pids = await program_ids_for_provider(p["_id"])
-        ptids = [i for i in await trainee_ids_for_programs(pids) if i in tset]
-        cs = await compute_summary(ptids)
-        if cs["total_trainees"]:
-            by_provider.append({"name": p["name"], "placement_rate": cs["placement_rate"], "total": cs["total_trainees"]})
+        tot = prov_totals.get(p["_id"], 0)
+        if tot:
+            by_provider.append({"name": p["name"], "placement_rate": _rate(prov_stats[p["_id"]]), "total": tot})
     by_provider.sort(key=lambda r: r["placement_rate"], reverse=True)
 
-    programs = await db.training_programs.find({}).to_list(200)
-    sector_groups: dict = {}
-    for pr in programs:
-        sector_groups.setdefault(pr["sector"], []).append(pr["_id"])
     by_sector = []
-    for sector, pids in sector_groups.items():
-        stids = [i for i in await trainee_ids_for_programs(pids) if i in tset]
-        cs = await compute_summary(stids)
-        if cs["total_trainees"]:
-            by_sector.append({"sector": sector, "placement_rate": cs["placement_rate"], "total": cs["total_trainees"]})
+    for sector, tot in sector_totals.items():
+        if tot:
+            by_sector.append({"sector": sector, "placement_rate": _rate(sector_stats[sector]), "total": tot})
     by_sector.sort(key=lambda r: r["placement_rate"], reverse=True)
 
     reasons = await db.non_placement_reasons.aggregate([
@@ -985,12 +1090,9 @@ async def analytics_overview(user: dict = Depends(get_current_user), district: O
     ]).to_list(20)
     non_placement = {r["_id"]: r["count"] for r in reasons}
 
-    all_districts = await db.trainees.distinct("district", tquery)
     district_ranking = []
-    for d in all_districts:
-        dtids = [t["_id"] for t in trainees if t.get("district") == d]
-        cs = await compute_summary(dtids)
-        district_ranking.append({"district": d, "placement_rate": cs["placement_rate"], "total": cs["total_trainees"]})
+    for d, tot in district_totals.items():
+        district_ranking.append({"district": d, "placement_rate": _rate(district_stats[d]), "total": tot})
     district_ranking.sort(key=lambda r: r["placement_rate"], reverse=True)
 
     return {"totals": totals, "by_provider": by_provider, "by_sector": by_sector,
@@ -1201,17 +1303,35 @@ async def at_risk_trainees(provider_id: str, level: str = Query("high", pattern=
     tids = await trainee_ids_for_programs(pids)
     trainees = await db.trainees.find({"_id": {"$in": tids}}, {"phone_number": 0}).to_list(100000)
 
+    # Batched: best enrollment + program per trainee (2 queries total, not 2*N)
+    enr_by_t = await _best_enrollment_map([t["_id"] for t in trainees])
+    prog_ids = list({e["program_id"] for e in enr_by_t.values() if e.get("program_id")})
+    prog_by_id = {}
+    if prog_ids:
+        prog_by_id = {p["_id"]: p for p in
+                      await db.training_programs.find({"_id": {"$in": prog_ids}}).to_list(100000)}
+
     wanted = {"high"} if level == "high" else ({"high", "medium"} if level == "medium" else {"high", "medium", "low"})
     rows = []
     for t in trainees:
-        risk = await _trainee_risk(t)
-        if not risk or risk["risk_level"] not in wanted:
+        enr = enr_by_t.get(t["_id"])
+        if not enr:
+            continue
+        prog = prog_by_id.get(enr["program_id"])
+        sector = prog["sector"] if prog else "Unknown"
+        risk = placement_risk.predict_risk(
+            attendance_percent=enr.get("attendance_percent", 0),
+            assessment_score=enr.get("assessment_score", 0),
+            course_sector=sector, district=t.get("district", "Unknown"),
+            gender=t.get("gender", "Unknown"), age=_age_from_dob(t.get("dob")),
+        )
+        if risk["risk_level"] not in wanted:
             continue
         rows.append({"trainee_id": str(t["_id"]), "full_name": t["full_name"],
                      "district": t.get("district"), "risk_score": risk["risk_score"],
                      "risk_level": risk["risk_level"],
                      "top_contributing_factors": risk["top_contributing_factors"],
-                     "course_sector": risk["basis"]["course_sector"]})
+                     "course_sector": sector})
     rows.sort(key=lambda r: r["risk_score"], reverse=True)
     return {"provider_id": provider_id, "provider_name": provider["name"],
             "level": level, "count": len(rows), "at_risk_trainees": rows[:limit]}
