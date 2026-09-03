@@ -8,10 +8,20 @@ import { RiskBadge } from "@/components/RiskBadge";
 import { INTERVAL_LABELS, FOLLOWUP_STATUS, prettyType } from "@/lib/ui";
 import {
   ArrowLeft, GraduationCap, Award, MessageCircle, Briefcase, ShieldCheck, ShieldOff,
-  MessageSquare, Loader2, MapPin, BadgeCheck, TrendingUp,
+  MessageSquare, Loader2, MapPin, BadgeCheck, TrendingUp, History, PencilLine,
 } from "lucide-react";
+import {
+  ResponsiveContainer, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,
+} from "recharts";
 
 const ORDER = ["1_month", "3_month", "6_month", "12_month"];
+const CONSENT_ACTION = {
+  granted: { label: "Consent Granted", dot: "bg-emerald-500", Icon: ShieldCheck },
+  scope_updated: { label: "Scope Updated", dot: "bg-amber-500", Icon: PencilLine },
+  revoked: { label: "Consent Revoked", dot: "bg-rose-500", Icon: ShieldOff },
+};
+const fmtInterval = (l) => ({ "1_month": "1 mo", "3_month": "3 mo", "6_month": "6 mo", "12_month": "12 mo" }[l] || l);
+const fmtDate = (ts) => { try { return new Date(ts).toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" }); } catch { return ts; } };
 
 export default function TraineeProfile() {
   const { id } = useParams();
@@ -21,19 +31,28 @@ export default function TraineeProfile() {
   const [programs, setPrograms] = useState({});
   const [risk, setRisk] = useState(null);
   const [riskState, setRiskState] = useState("loading");
+  const [consentLogs, setConsentLogs] = useState([]);
+  const [wagePoints, setWagePoints] = useState([]);
   const [loading, setLoading] = useState(true);
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [t, fu, pr] = await Promise.all([
+      const [t, fu, pr, cl, wp] = await Promise.all([
         api.get(`/trainees/${id}`),
         api.get(`/followups?trainee_id=${id}`),
         api.get(`/programs`),
+        api.get(`/trainees/${id}/consent-logs`),
+        api.get(`/trainees/${id}/wage-progression`),
       ]);
       setD(t.data);
-      setFollowups((fu.data.items || []).sort((a, b) => ORDER.indexOf(a.interval_label) - ORDER.indexOf(b.interval_label)));
+      const _fitems = (fu.data.items || []);
+      const _seen = {};
+      _fitems.forEach((x) => { const k = x.interval_label; if (!_seen[k] || (x.created_at || "") > (_seen[k].created_at || "")) _seen[k] = x; });
+      setFollowups(Object.values(_seen).sort((a, b) => ORDER.indexOf(a.interval_label) - ORDER.indexOf(b.interval_label)));
       setPrograms(Object.fromEntries(pr.data.map((p) => [p._id, p])));
+      setConsentLogs(cl.data.items || []);
+      setWagePoints(wp.data.points || []);
       setRiskState("loading");
       api.get(`/analytics/trainee/${id}/risk`)
         .then((r) => { setRisk(r.data.risk); setRiskState("ok"); })
@@ -171,6 +190,61 @@ export default function TraineeProfile() {
                 </div>
               )}
             </div>
+          </div>
+        </div>
+
+        {/* Wage progression + Consent audit trail */}
+        <div className="grid lg:grid-cols-2 gap-6 mt-6">
+          <div className="bg-white rounded-xl border border-slate-200/90 shadow-sm p-6" data-testid="wage-progression">
+            <div className="flex items-center gap-2 font-heading font-semibold text-slate-800"><TrendingUp className="h-4 w-4 text-indiagreen" /> Wage Progression</div>
+            <p className="text-xs text-slate-400 mt-0.5 mb-3">Self-reported monthly income (₹ '000s) across follow-up check-ins.</p>
+            {wagePoints.length < 2 ? (
+              <div className="h-[220px] grid place-items-center text-sm text-slate-400">Not enough follow-up wage data to plot a trend.</div>
+            ) : (
+              <ResponsiveContainer width="100%" height={240}>
+                <LineChart data={wagePoints} margin={{ left: -12, right: 8 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#E2E8F0" vertical={false} />
+                  <XAxis dataKey="interval_label" tickFormatter={fmtInterval} tick={{ fontSize: 11 }} />
+                  <YAxis tick={{ fontSize: 11 }} unit="k" domain={[0, 32]} />
+                  <Tooltip content={({ active, payload }) => active && payload?.length ? (
+                    <div className="bg-white border border-slate-200 rounded-lg shadow-md p-2 text-xs">
+                      <div className="font-semibold text-slate-700">{fmtInterval(payload[0].payload.interval_label)}</div>
+                      <div className="text-slate-600">Bracket: <b>₹{payload[0].payload.wage_bracket}</b></div>
+                      <div className="text-slate-600">Est: <b>₹{payload[0].value}k/mo</b></div>
+                    </div>
+                  ) : null} />
+                  <Line type="monotone" dataKey="wage_value" name="Income" stroke="#15803D" strokeWidth={2.5} dot={{ r: 4, fill: "#15803D" }} activeDot={{ r: 6 }} />
+                </LineChart>
+              </ResponsiveContainer>
+            )}
+          </div>
+
+          <div className="bg-white rounded-xl border border-slate-200/90 shadow-sm p-6" data-testid="consent-audit-trail">
+            <div className="flex items-center gap-2 font-heading font-semibold text-slate-800"><History className="h-4 w-4 text-brand" /> Consent Audit Trail</div>
+            <p className="text-xs text-slate-400 mt-0.5 mb-3">Every grant, scope change and revocation is logged for governance & compliance.</p>
+            {consentLogs.length === 0 ? (
+              <p className="text-sm text-slate-400">No consent events recorded.</p>
+            ) : (
+              <ol className="relative border-l-2 border-slate-100 ml-2.5 space-y-4">
+                {consentLogs.map((l, i) => {
+                  const a = CONSENT_ACTION[l.action] || CONSENT_ACTION.granted;
+                  const Icon = a.Icon;
+                  return (
+                    <li key={i} className="ml-6" data-testid={`consent-log-${i}`}>
+                      <span className={`absolute -left-[11px] grid place-items-center h-5 w-5 rounded-full text-white ${a.dot}`}><Icon className="h-3 w-3" /></span>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="font-semibold text-slate-800 text-sm">{a.label}</span>
+                        <span className="text-xs text-slate-400">{fmtDate(l.timestamp)}</span>
+                      </div>
+                      <div className="text-xs text-slate-500 mt-0.5">
+                        by {l.performed_by}
+                        {l.scope?.length ? ` · scopes: ${l.scope.join(", ")}` : (l.action === "revoked" ? " · all scopes withdrawn" : "")}
+                      </div>
+                    </li>
+                  );
+                })}
+              </ol>
+            )}
           </div>
         </div>
       </main>

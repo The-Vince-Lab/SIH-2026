@@ -36,6 +36,8 @@ non-placement reasons · role-based analytics · explainable AI · confidence sc
 - 2026-06 Phase 5: full React frontend (login, provider + admin dashboards, WhatsApp simulator,
   public employer verify, trainee journey timeline). Verified; enroll-RBAC, session-crash,
   simulator-state and gender-factor fairness bugs fixed.
+- 2026-06 Phase 6: Consent Audit Trail viewer + logging, filter-aware CSV/PDF report export,
+  wage-progression line chart on trainee journey. Verified full-stack (15/15 + 71 regression).
 
 ## Backlog (prioritized)
 - P1: follow-up cycle "nothing due" info toast wording; shadcn Calendar for DOB; chart maxBarSize / axis label polish.

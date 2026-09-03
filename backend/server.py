@@ -26,6 +26,12 @@ from auth import create_access_token, decode_token
 from security import hash_password, verify_password, encrypt_phone, mask_phone
 from db import ensure_indexes
 from ml import text_classifier, identity_matching, response_classifier, placement_risk
+import csv as _csv
+import io as _io
+from fastapi.responses import Response
+
+_PRETTY_TYPE = {"employed": "Employed", "self_employed": "Self-Employed",
+                "apprentice": "Apprentice", "unemployed": "Unemployed"}
 
 # ---------------------------------------------------------------------------
 # App / DB setup
@@ -318,14 +324,64 @@ async def update_consent(trainee_id: str, body: ConsentBody, user: dict = Depend
     await assert_trainee_access(user, tid)
     if not await db.trainees.find_one({"_id": tid}):
         raise HTTPException(status_code=404, detail="Trainee not found")
+    existing = await db.trainees.find_one({"_id": tid})
+    if not existing:
+        raise HTTPException(status_code=404, detail="Trainee not found")
     now = datetime.now(timezone.utc)
-    action = "granted" if body.given else "revoked"
+    prev = existing.get("consent", {})
+    if not body.given:
+        action = "revoked"
+    elif not prev.get("given"):
+        action = "granted"
+    elif set(prev.get("scope", [])) != set(body.scope):
+        action = "scope_updated"
+    else:
+        action = "granted"
     await db.trainees.update_one({"_id": tid}, {"$set": {
         "consent": {"given": body.given, "timestamp": now if body.given else None,
                     "scope": body.scope if body.given else []}}})
     await db.consent_logs.insert_one({"trainee_id": tid, "action": action, "timestamp": now,
+                                      "scope": body.scope if body.given else [],
                                       "performed_by": user["email"]})
-    return {"trainee_id": trainee_id, "consent": {"given": body.given, "scope": body.scope if body.given else []}}
+    return {"trainee_id": trainee_id, "action": action, "consent": {"given": body.given, "scope": body.scope if body.given else []}}
+
+
+@api.get("/trainees/{trainee_id}/consent-logs")
+async def consent_logs(trainee_id: str, user: dict = Depends(get_current_user)):
+    tid = oid(trainee_id)
+    await assert_trainee_access(user, tid)
+    if not await db.trainees.find_one({"_id": tid}, {"_id": 1}):
+        raise HTTPException(status_code=404, detail="Trainee not found")
+    logs = await db.consent_logs.find({"trainee_id": tid}).sort("timestamp", 1).to_list(500)
+    return {"items": ser(logs)}
+
+
+WAGE_VALUE = {"<10k": 8, "10-15k": 12.5, "15-25k": 20, "25k+": 30}
+_INTERVAL_ORDER = {"1_month": 1, "3_month": 3, "6_month": 6, "12_month": 12}
+
+
+@api.get("/trainees/{trainee_id}/wage-progression")
+async def wage_progression(trainee_id: str, user: dict = Depends(get_current_user)):
+    tid = oid(trainee_id)
+    await assert_trainee_access(user, tid)
+    if not await db.trainees.find_one({"_id": tid}, {"_id": 1}):
+        raise HTTPException(status_code=404, detail="Trainee not found")
+    fus = await db.followups.find({"trainee_id": tid, "status": "responded"}).to_list(500)
+    best = {}  # de-duplicate per interval (a trainee may have >1 enrollment) — keep latest response
+    for f in fus:
+        sr = f.get("structured_response") or {}
+        wb = sr.get("wage_bracket")
+        if not wb or wb not in WAGE_VALUE:
+            continue
+        label = f["interval_label"]
+        cur = best.get(label)
+        if cur is None or (f.get("created_at") and cur.get("_ts") and f["created_at"] > cur["_ts"]):
+            best[label] = {"interval_label": label, "months": _INTERVAL_ORDER.get(label, 0),
+                           "wage_bracket": wb, "wage_value": WAGE_VALUE[wb], "_ts": f.get("created_at")}
+    points = sorted(best.values(), key=lambda p: p["months"])
+    for p in points:
+        p.pop("_ts", None)
+    return {"trainee_id": trainee_id, "points": points}
 
 
 # ===========================================================================
@@ -882,6 +938,140 @@ async def analytics_overview(user: dict = Depends(get_current_user), district: O
     return {"totals": totals, "by_provider": by_provider, "by_sector": by_sector,
             "wage_distribution": totals["wage_distribution"], "non_placement_reasons": non_placement,
             "confidence_breakdown": totals["confidence_breakdown"], "district_ranking": district_ranking}
+
+
+async def _filtered_trainees(user, district, provider_id, program_id, gender, age_group):
+    allowed = await accessible_trainee_ids(user)
+    tquery = {} if allowed is None else {"_id": {"$in": allowed}}
+    if district:
+        tquery["district"] = district
+    if gender:
+        tquery["gender"] = gender
+    restrict = None
+    if program_id:
+        restrict = await trainee_ids_for_programs([oid(program_id)])
+    if provider_id:
+        pids = await program_ids_for_provider(oid(provider_id))
+        ids = await trainee_ids_for_programs(pids)
+        restrict = ids if restrict is None else [i for i in restrict if i in set(ids)]
+    if restrict is not None:
+        tquery["_id"] = {"$in": _intersect(tquery.get("_id"), restrict)}
+    trainees = await db.trainees.find(tquery, {"phone_number": 0}).to_list(100000)
+    if age_group:
+        trainees = [t for t in trainees if _age_bucket(t.get("dob")) == age_group]
+    return trainees
+
+
+async def _export_rows(trainees):
+    programs = {p["_id"]: p for p in await db.training_programs.find({}).to_list(500)}
+    providers = {p["_id"]: p for p in await db.training_providers.find({}).to_list(200)}
+    rows = []
+    for t in trainees:
+        enr = await db.enrollments.find_one({"trainee_id": t["_id"]}, sort=[("certified", -1), ("certification_date", -1)])
+        prog = programs.get(enr["program_id"]) if enr else None
+        prov = providers.get(prog["provider_id"]) if prog else None
+        emp = await db.employment_records.find_one({"trainee_id": t["_id"]}, sort=[("reported_at", -1)])
+        fu = await db.followups.find_one({"trainee_id": t["_id"], "status": {"$ne": "pending"}}, sort=[("scheduled_date", -1)])
+        rows.append([
+            t["full_name"], t.get("district") or "", t.get("gender") or "", _age_bucket(t.get("dob")),
+            prov["name"] if prov else "", prog["course_name"] if prog else "", prog["sector"] if prog else "",
+            "Yes" if enr and enr.get("certified") else "No",
+            _PRETTY_TYPE.get(emp["type"], "Unknown") if emp else "Unknown",
+            (emp.get("wage_bracket") or "") if emp else "",
+            "Yes" if emp and emp.get("employer_verified") else "No",
+            fu["confidence_score"] if fu else "unreachable",
+        ])
+    return rows
+
+
+_EXPORT_HEADER = ["Trainee", "District", "Gender", "Age Group", "Provider", "Course", "Sector",
+                  "Certified", "Outcome", "Wage Bracket", "Employer Verified", "Data Confidence"]
+
+
+@api.get("/analytics/export.csv")
+async def export_csv(user: dict = Depends(get_current_user), district: Optional[str] = None,
+                     provider_id: Optional[str] = None, program_id: Optional[str] = None,
+                     gender: Optional[str] = None, age_group: Optional[str] = None):
+    trainees = await _filtered_trainees(user, district, provider_id, program_id, gender, age_group)
+    rows = await _export_rows(trainees)
+    buf = _io.StringIO()
+    w = _csv.writer(buf)
+    w.writerow(_EXPORT_HEADER)
+    w.writerows(rows)
+    return Response(content=buf.getvalue(), media_type="text/csv",
+                    headers={"Content-Disposition": "attachment; filename=skilltrace_export.csv"})
+
+
+@api.get("/analytics/export.pdf")
+async def export_pdf(user: dict = Depends(get_current_user), district: Optional[str] = None,
+                     provider_id: Optional[str] = None, program_id: Optional[str] = None,
+                     gender: Optional[str] = None, age_group: Optional[str] = None):
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib import colors
+    from reportlab.lib.units import cm
+    from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+    from reportlab.lib.styles import getSampleStyleSheet
+
+    trainees = await _filtered_trainees(user, district, provider_id, program_id, gender, age_group)
+    tids = [t["_id"] for t in trainees]
+    summary = await compute_summary(tids)
+
+    # provider + sector placement
+    tset = set(tids)
+    providers = await db.training_providers.find({}).to_list(200)
+    by_provider = []
+    for p in providers:
+        pids = await program_ids_for_provider(p["_id"])
+        ptids = [i for i in await trainee_ids_for_programs(pids) if i in tset]
+        cs = await compute_summary(ptids)
+        if cs["total_trainees"]:
+            by_provider.append([p["name"], f"{cs['placement_rate']}%", str(cs["total_trainees"])])
+    by_provider.sort(key=lambda r: float(r[1][:-1]), reverse=True)
+
+    styles = getSampleStyleSheet()
+    buf = _io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=A4, topMargin=1.5 * cm, bottomMargin=1.5 * cm)
+    story = []
+    story.append(Paragraph("SkillTrace AI — Outcomes Report", styles["Title"]))
+    filt = ", ".join([f"{k}={v}" for k, v in
+                      {"District": district, "Provider": provider_id, "Course": program_id,
+                       "Gender": gender, "Age": age_group}.items() if v]) or "All data (no filters)"
+    story.append(Paragraph(f"Filters: {filt}", styles["Normal"]))
+    story.append(Paragraph(f"Generated: {datetime.now(timezone.utc).strftime('%d %b %Y %H:%M UTC')}", styles["Normal"]))
+    story.append(Spacer(1, 0.5 * cm))
+
+    kpi = [["Trainees", "Placement Rate", "Employer-Verified", "Reachable Rate"],
+           [str(summary["total_trainees"]), f"{summary['placement_rate']}%",
+            str(summary["verified_count"]), f"{summary['reachable_rate']}%"]]
+    kt = Table(kpi, colWidths=[4 * cm] * 4)
+    kt.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1E3A8A")),
+                            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                            ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#CBD5E1")),
+                            ("FONTSIZE", (0, 0), (-1, -1), 10), ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+                            ("TOPPADDING", (0, 0), (-1, -1), 6), ("BOTTOMPADDING", (0, 0), (-1, -1), 6)]))
+    story.append(kt)
+    story.append(Spacer(1, 0.6 * cm))
+
+    story.append(Paragraph("Placement Rate by Provider", styles["Heading2"]))
+    pt = Table([["Provider", "Placement", "Trainees"]] + (by_provider or [["No data", "", ""]]), colWidths=[9 * cm, 3 * cm, 3 * cm])
+    pt.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#F1F5F9")),
+                            ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#E2E8F0")),
+                            ("FONTSIZE", (0, 0), (-1, -1), 9)]))
+    story.append(pt)
+    story.append(Spacer(1, 0.5 * cm))
+
+    conf = summary["confidence_breakdown"]
+    story.append(Paragraph("Data Confidence (honest quality scoring)", styles["Heading2"]))
+    ct = Table([["Verified", "Self-Reported", "Unreachable"],
+                [str(conf.get("verified", 0)), str(conf.get("self_reported", 0)), str(conf.get("unreachable", 0))]],
+               colWidths=[5 * cm] * 3)
+    ct.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#F1F5F9")),
+                            ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#E2E8F0")),
+                            ("FONTSIZE", (0, 0), (-1, -1), 9), ("ALIGN", (0, 0), (-1, -1), "CENTER")]))
+    story.append(ct)
+    doc.build(story)
+    return Response(content=buf.getvalue(), media_type="application/pdf",
+                    headers={"Content-Disposition": "attachment; filename=skilltrace_report.pdf"})
 
 
 # ---------------------------------------------------------------------------

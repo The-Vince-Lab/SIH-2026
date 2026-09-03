@@ -10,7 +10,7 @@ import { useAuth } from "@/context/AuthContext";
 import { Navbar } from "@/components/Navbar";
 import { StatCard } from "@/components/StatCard";
 import { DISTRICTS, SECTORS, AGE_GROUPS, CHART_COLORS, REASON_OPTIONS } from "@/lib/ui";
-import { Filter, Loader2, Trophy } from "lucide-react";
+import { Filter, Loader2, Trophy, Download } from "lucide-react";
 
 const REASON_LABEL = Object.fromEntries(REASON_OPTIONS.map((r) => [r.value, r.label]));
 const CONF_COLORS = { verified: "#10B981", self_reported: "#F59E0B", unreachable: "#F43F5E" };
@@ -47,12 +47,40 @@ export default function AdminDashboard() {
 
   const setFilter = (k, v) => setF((prev) => ({ ...prev, [k]: v }));
 
+  const download = async (fmt) => {
+    const qs = Object.entries(f).filter(([, v]) => v).map(([k, v]) => `${k}=${encodeURIComponent(v)}`).join("&");
+    try {
+      const res = await api.get(`/analytics/export.${fmt}${qs ? `?${qs}` : ""}`, { responseType: "blob" });
+      const url = URL.createObjectURL(res.data);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = fmt === "csv" ? "skilltrace_export.csv" : "skilltrace_report.pdf";
+      document.body.appendChild(a); a.click(); a.remove();
+      URL.revokeObjectURL(url);
+      toast.success(`${fmt.toUpperCase()} downloaded`);
+    } catch (e) { toast.error("Export failed"); }
+  };
+
   return (
     <div className="min-h-screen bg-background">
       <Navbar />
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 sm:py-8">
-        <h1 className="font-heading text-2xl sm:text-3xl font-bold text-slate-900">Government Analytics Dashboard</h1>
-        <p className="text-sm text-slate-500 mt-0.5">Compare providers, courses, cohorts and districts — with honest data-confidence scoring.</p>
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <h1 className="font-heading text-2xl sm:text-3xl font-bold text-slate-900">Government Analytics Dashboard</h1>
+            <p className="text-sm text-slate-500 mt-0.5">Compare providers, courses, cohorts and districts — with honest data-confidence scoring.</p>
+          </div>
+          <div className="flex gap-2">
+            <button data-testid="export-csv-btn" onClick={() => download("csv")}
+              className="inline-flex items-center gap-2 rounded-lg border border-slate-300 text-slate-700 hover:bg-slate-50 font-semibold text-sm px-3.5 py-2">
+              <Download className="h-4 w-4" /> CSV
+            </button>
+            <button data-testid="export-pdf-btn" onClick={() => download("pdf")}
+              className="inline-flex items-center gap-2 rounded-lg bg-brand hover:bg-brand-hover text-white font-semibold text-sm px-3.5 py-2">
+              <Download className="h-4 w-4" /> PDF Report
+            </button>
+          </div>
+        </div>
 
         {/* Filters */}
         <div className="mt-5 bg-white rounded-xl border border-slate-200/90 shadow-sm p-4">

@@ -164,11 +164,27 @@ def seed():
             "created_at": datetime.now(timezone.utc) - timedelta(days=random.randint(200, 600)),
         })
         if consent_given:
+            grant_ts = datetime.now(timezone.utc) - timedelta(days=random.randint(200, 500))
             db.consent_logs.insert_one({
-                "trainee_id": tid, "action": "granted",
-                "timestamp": datetime.now(timezone.utc) - timedelta(days=random.randint(200, 500)),
+                "trainee_id": tid, "action": "granted", "timestamp": grant_ts,
+                "scope": ["employment_status", "wage_data", "contact_for_verification"],
                 "performed_by": "system_intake",
             })
+            # ~22% later update their consent scope
+            if random.random() < 0.22:
+                db.consent_logs.insert_one({
+                    "trainee_id": tid, "action": "scope_updated",
+                    "timestamp": grant_ts + timedelta(days=random.randint(30, 120)),
+                    "scope": ["employment_status", "wage_data"],
+                    "performed_by": random.choice(["field_agent_01", "trainee_self"]),
+                })
+            # ~8% revoked consent at some point
+            if random.random() < 0.08:
+                db.consent_logs.insert_one({
+                    "trainee_id": tid, "action": "revoked",
+                    "timestamp": grant_ts + timedelta(days=random.randint(120, 200)),
+                    "scope": [], "performed_by": "trainee_self",
+                })
 
         # Enrollment(s) — generate stats first (a few trainees enrolled in 2 programs)
         n_programs = 2 if random.random() < 0.12 else 1
@@ -226,7 +242,10 @@ def seed():
 
 
 def _seed_followups(tid, eid, prog, outcome):
-    for label, offset in INTERVALS:
+    etype = _outcome_to_emp_type(outcome) if outcome == "placed" else "unemployed"
+    start_idx = random.randint(0, 1)  # starting wage bracket for rising progression
+    emp = f"{prog['sector']} {random.choice(['Enterprises', 'Solutions', 'Works', 'Services'])}"
+    for i, (label, offset) in enumerate(INTERVALS):
         sched = rand_date(300, 10)
         if outcome == "unreachable":
             status = random.choice(["unreachable", "escalated_to_field_agent", "sent"])
@@ -236,11 +255,15 @@ def _seed_followups(tid, eid, prog, outcome):
         else:
             status = "responded"
             channel = random.choice(["whatsapp", "sms"])
-            etype = _outcome_to_emp_type(outcome)
-            wage = random.choice(WAGE_BRACKETS)
-            emp = f"{prog['sector']} {random.choice(['Enterprises', 'Solutions', 'Works', 'Services'])}"
-            raw = random.choice(RESPONSE_TEMPLATES[etype]).format(emp=emp, wage=wage)
-            structured = {"employment_type": etype, "wage_bracket": wage, "employer_name": emp if etype != "unemployed" else None}
+            if etype == "unemployed":
+                wage = None
+                raw = random.choice(RESPONSE_TEMPLATES[etype]).format(emp=emp, wage="")
+                structured = {"employment_type": etype, "wage_bracket": None, "employer_name": None}
+            else:
+                widx = min(3, start_idx + i // 2 + (1 if (i == 3 and random.random() < 0.5) else 0))
+                wage = WAGE_BRACKETS[widx]
+                raw = random.choice(RESPONSE_TEMPLATES[etype]).format(emp=emp, wage=wage)
+                structured = {"employment_type": etype, "wage_bracket": wage, "employer_name": emp}
             conf = "self_reported"
         db.followups.insert_one({
             "trainee_id": tid, "enrollment_id": eid, "interval_label": label,

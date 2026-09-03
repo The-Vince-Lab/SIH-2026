@@ -82,3 +82,7 @@ Every follow-up data point tagged: `verified` > `self_reported` > `unreachable`
   public employer verification `/verify/:token`, District/State Admin analytics (6 Recharts +
   filters + drill-down), Trainee journey timeline. Verified (95%); fixed provider-enroll RBAC,
   expired-session crash, simulator state reset, and removed gender from risk explanations.
+- **Phase 6 (done):** Consent Audit Trail (consent-log endpoint + granted/scope_updated/revoked
+  logging + timeline UI), Report Export (filter-aware CSV + reportlab PDF from the admin
+  dashboard), and Wage Progression line chart on the trainee journey (deduped per interval).
+  Verified full-stack (15/15 new + 71 regression tests).
