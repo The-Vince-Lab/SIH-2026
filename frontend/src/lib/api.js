@@ -1,6 +1,17 @@
 import axios from "axios";
 
-const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
+const RAW_BASE = process.env.REACT_APP_BACKEND_URL;
+if (!RAW_BASE) {
+  // Fail loudly in the console instead of silently calling "undefined/api/...".
+  // eslint-disable-next-line no-console
+  console.error(
+    "[SkillTrace] REACT_APP_BACKEND_URL is not set. API calls will fail. " +
+      "Set it in the frontend environment (e.g. Vercel project env var) and rebuild."
+  );
+}
+// Normalize: drop any trailing slash so we never produce a double slash before /api.
+const BASE = (RAW_BASE || "").replace(/\/+$/, "");
+const API = `${BASE}/api`;
 
 const api = axios.create({ baseURL: API });
 
