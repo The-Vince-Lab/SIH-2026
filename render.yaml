@@ -1,0 +1,38 @@
+# Render Blueprint for the SkillTrace AI backend (FastAPI).
+# Deploy: Render Dashboard -> New -> Blueprint -> pick your GitHub repo.
+# The database is NOT created here - create a free MongoDB Atlas cluster and paste
+# its connection string into the MONGO_URL env var (marked sync:false below).
+# Docs: https://render.com/docs/blueprint-spec
+
+services:
+  - type: web
+    name: skilltrace-api
+    runtime: python
+    plan: free
+    rootDir: backend
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "uvicorn server:app --host 0.0.0.0 --port $PORT"
+    healthCheckPath: /api/ml/health
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.11.10"
+      # Paste your MongoDB Atlas SRV string, e.g.
+      # mongodb+srv://USER:PASSWORD@cluster0.xxxxx.mongodb.net/?retryWrites=true&w=majority
+      - key: MONGO_URL
+        sync: false
+      - key: DB_NAME
+        value: skilltrace
+      # Secrets are auto-generated once at service creation and then kept stable.
+      - key: JWT_SECRET
+        generateValue: true
+      # IMPORTANT: seed the DB from the Render Shell so the seed uses this SAME key
+      # (phone numbers are Fernet-encrypted with it; a mismatch breaks decryption).
+      - key: PHONE_ENCRYPTION_KEY
+        generateValue: true
+      - key: ADMIN_EMAIL
+        value: admin@skilltrace.gov.in
+      - key: ADMIN_PASSWORD
+        sync: false
+      # Set to your Vercel URL, e.g. https://YOUR-APP.vercel.app (comma-separated for many).
+      - key: CORS_ORIGINS
+        sync: false

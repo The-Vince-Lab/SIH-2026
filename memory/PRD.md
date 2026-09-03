@@ -59,4 +59,8 @@ frontend testing agent 5/5 sections. Container reset repaired: restored backend/
 reseeded 150 trainees. Fixed 3 stale auth-lockout tests (hardcoded DB name -> env DB_NAME).
 
 ## Next tasks
-Awaiting user's Phase 7 (Demo Data Story & Final Polish) instructions.
+Deployment adaptation for Vercel (frontend) + Render (backend) + MongoDB Atlas DONE:
+trimmed backend/requirements.txt (removed unused emergentintegrations+litellm that broke pip),
+added render.yaml ($PORT bind + env), frontend/vercel.json (SPA rewrites), DEPLOYMENT.md guide,
+hardened frontend/src/lib/api.js (normalize backend URL + loud error if unset). Login re-verified
+(all 4 roles) after api.js change. Awaiting user's actual Vercel/Render URLs + Atlas string at deploy time.
