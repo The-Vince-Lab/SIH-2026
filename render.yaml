@@ -25,10 +25,10 @@ services:
       # Secrets are auto-generated once at service creation and then kept stable.
       - key: JWT_SECRET
         generateValue: true
-      # IMPORTANT: seed the DB from the Render Shell so the seed uses this SAME key
-      # (phone numbers are Fernet-encrypted with it; a mismatch breaks decryption).
+      # IMPORTANT: this MUST match the key used to seed the DB, or encrypted phone
+      # numbers can't be decrypted. Your Atlas data was seeded with this exact value.
       - key: PHONE_ENCRYPTION_KEY
-        generateValue: true
+        value: "skilltrace-sih2026-phone-fernet-secret"
       - key: ADMIN_EMAIL
         value: admin@skilltrace.gov.in
       - key: ADMIN_PASSWORD
